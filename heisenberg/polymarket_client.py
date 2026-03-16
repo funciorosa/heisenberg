@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BASE_URL = "https://clob.polymarket.com"
+GAMMA_URL = "https://gamma-api.polymarket.com"
 DEFAULT_TIMEOUT = 10.0          # seconds per request
 MAX_RETRIES = 3
 BACKOFF_BASE = 1.0              # seconds; doubles each retry
@@ -284,14 +285,14 @@ class PolymarketCLOBClient:
         Parameters
         ----------
         token_id:
-            The hex token ID (outcome token address) for the market side.
+            The decimal token ID as returned by the Gamma API clobTokenIds field.
 
         Returns
         -------
         OrderBook
             Snapshot containing bids and asks sorted as returned by the API.
         """
-        data = await self._get(f"/order-book/{token_id}")
+        data = await self._get("/book", params={"token_id": token_id})
         bids = _parse_price_levels(data.get("bids", []))
         asks = _parse_price_levels(data.get("asks", []))
         return OrderBook(token_id=token_id, bids=bids, asks=asks)
@@ -344,7 +345,7 @@ class PolymarketCLOBClient:
     async def search_markets(
         self,
         query: str,
-        limit: int = 50,
+        limit: int = 100,
         active_only: bool = True,
     ) -> list[MarketInfo]:
         """Search markets by keyword.
@@ -362,7 +363,7 @@ class PolymarketCLOBClient:
         -------
         list of MarketInfo objects.
         """
-        params: dict[str, Any] = {"search": query, "limit": limit}
+        params: dict[str, Any] = {"search": query, "limit": limit, "active": "true"}
         data = await self._get("/markets", params=params)
 
         raw_items: list[dict[str, Any]] = []
@@ -376,36 +377,107 @@ class PolymarketCLOBClient:
             markets = [m for m in markets if m.active]
         return markets
 
-    async def fetch_btc_markets(self) -> list[MarketInfo]:
-        """Fetch active BTC-related prediction markets.
+    async def _gamma_get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """GET against the Gamma API (market discovery) using a one-shot client."""
+        url = GAMMA_URL.rstrip("/") + path
+        async with httpx.AsyncClient(timeout=self.timeout, headers={"Accept": "application/json"}) as c:
+            response = await c.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
 
-        Searches for markets containing "BTC" in their title/question and
-        returns only active ones.
+    async def fetch_btc_markets(self) -> list[MarketInfo]:
+        """Fetch active BTC/Bitcoin prediction markets via the Gamma API.
+
+        Uses gamma-api.polymarket.com/events with tag_slug=crypto, then
+        filters for Bitcoin-related markets.  Falls back to CLOB search
+        if the Gamma API is unavailable.
 
         Returns
         -------
         list of MarketInfo representing live BTC markets.
         """
-        return await self.search_markets("BTC", active_only=True)
+        btc_kws = ("btc", "bitcoin")
+        results: list[MarketInfo] = []
+        seen: set[str] = set()
+
+        try:
+            # Pull crypto events — each event contains multiple correlated markets
+            data = await self._gamma_get(
+                "/events",
+                params={"closed": "false", "limit": 100, "tag_slug": "crypto"},
+            )
+            events = data if isinstance(data, list) else data.get("data", [])
+            for event in events:
+                for mkt in event.get("markets", []):
+                    question = mkt.get("question") or mkt.get("title") or ""
+                    if not any(kw in question.lower() for kw in btc_kws):
+                        continue
+                    # Only include markets that currently accept orders on the CLOB
+                    if not mkt.get("acceptingOrders", False):
+                        continue
+                    cid = mkt.get("conditionId") or mkt.get("condition_id") or ""
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    # clobTokenIds is the live token list from Gamma API
+                    raw_token_ids = mkt.get("clobTokenIds") or mkt.get("tokens") or []
+                    if isinstance(raw_token_ids, str):
+                        import json as _json
+                        try:
+                            raw_token_ids = _json.loads(raw_token_ids)
+                        except Exception:
+                            raw_token_ids = []
+                    tokens = [{"token_id": tid} for tid in raw_token_ids if isinstance(tid, str)]
+                    results.append(MarketInfo(
+                        condition_id=cid,
+                        question=question,
+                        end_date=mkt.get("endDateIso") or mkt.get("endDate"),
+                        volume=float(mkt.get("volumeNum") or mkt.get("volume") or 0),
+                        active=not mkt.get("closed", False),
+                        tokens=tokens,
+                        raw=mkt,
+                    ))
+        except Exception as exc:
+            logger.warning("Gamma API unavailable (%s) — falling back to CLOB search", exc)
+            # Fallback: CLOB text search
+            for term in ("Bitcoin", "BTC"):
+                try:
+                    for m in await self.search_markets(term, active_only=True):
+                        if m.condition_id not in seen and any(kw in m.question.lower() for kw in btc_kws):
+                            seen.add(m.condition_id)
+                            results.append(m)
+                except Exception as e2:
+                    logger.warning("CLOB search(%r) failed: %s", term, e2)
+
+        logger.info("fetch_btc_markets: %d live BTC markets found", len(results))
+        return results
 
     async def fetch_btc_5min_markets(self) -> list[MarketInfo]:
-        """Fetch active BTC 5-minute price resolution markets.
+        """Return BTC markets best suited for short-horizon scanning.
 
-        Filters the broader BTC market list to those that appear to be
-        5-minute resolution markets (title contains "5" and time-related
-        keywords like "min", "minute", "5m").
+        Polymarket does not currently offer sub-hour BTC resolution markets.
+        This method returns all active BTC price prediction markets so the
+        HEISENBERG pipeline still has data to process.  If explicit 5-min
+        markets appear in future, the keyword filter will pick them up first.
 
         Returns
         -------
-        list of MarketInfo for BTC 5-minute markets.
+        list of MarketInfo for BTC markets.
         """
         all_btc = await self.fetch_btc_markets()
-        keywords = ("5 min", "5min", "5-min", "5m ", "5 m", "five min", "5 minute")
-        result = [
-            m for m in all_btc
-            if any(kw in m.question.lower() for kw in keywords)
-        ]
-        return result
+
+        # Prefer explicit short-interval markets if they exist
+        short_kws = ("5-minute", "5 minute", "5min", "hourly", "1-hour", "1 hour")
+        short = [m for m in all_btc if any(kw in m.question.lower() for kw in short_kws)]
+        if short:
+            logger.info("fetch_btc_5min_markets: %d short-interval markets", len(short))
+            return short
+
+        logger.info(
+            "fetch_btc_5min_markets: no short-interval markets — scanning all %d BTC markets",
+            len(all_btc),
+        )
+        return all_btc
 
     async def fetch_mid_prices(self, token_ids: list[str]) -> dict[str, float]:
         """Fetch mid-point prices for a batch of tokens.

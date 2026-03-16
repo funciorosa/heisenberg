@@ -1,9 +1,9 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import Heisenberg from "./Heisenberg";
+import App from "./App";
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
-    <Heisenberg />
+    <App />
   </StrictMode>
 );
