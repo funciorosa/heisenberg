@@ -421,6 +421,9 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
   const [maxDD, setMaxDD]           = useState(0.0);
   const [expectedEdge, setExpectedEdge] = useState(0.0);
   const [wsStatus, setWsStatus] = useState("connecting"); // "live" | "reconnecting" | "connecting"
+  const [tradeMode, setTradeMode] = useState(mode);      // "paper" | "live" — updated from bot_state
+  const [balFloor, setBalFloor] = useState(false);
+  const [positionsOpen, setPositionsOpen] = useState(0);
 
   const streamRef   = useRef(null);
   const wsRef       = useRef(null);
@@ -456,6 +459,9 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
         if (data.max_dd != null)        setMaxDD(data.max_dd);
         if (data.expected_edge != null) setExpectedEdge(data.expected_edge);
         if (data.stream?.length)      setStream(data.stream.slice(-90));
+        if (data.mode != null)          setTradeMode(data.mode);
+        if (data.balance_floor_alert != null) setBalFloor(data.balance_floor_alert);
+        if (data.positions_open != null) setPositionsOpen(data.positions_open);
         if (data.balance != null && Math.random() < 0.2) {
           const delta = (data.balance - bal).toFixed(2);
           const pos = delta >= 0;
@@ -549,6 +555,29 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
           )}
         </div>
       </div>
+
+      {/* LIVE MODE BANNER */}
+      {tradeMode === "live" && (
+        <div style={{
+          background: "rgba(255,49,49,0.12)",
+          border: "1px solid var(--red)",
+          borderLeft: "4px solid var(--red)",
+          color: "var(--red)",
+          padding: "5px 16px",
+          fontSize: "10px",
+          letterSpacing: "0.15em",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}>
+          <span>⚠ LIVE TRADING — REAL USDC — NOT A SIMULATION</span>
+          <span>
+            {balFloor
+              ? "🔴 PAUSED — BALANCE FLOOR HIT"
+              : `POSITIONS: ${positionsOpen}/3 · MAX $1.00/ORDER`}
+          </span>
+        </div>
+      )}
 
       {/* PANELS */}
       <div className="panels">
@@ -655,7 +684,7 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
               </div>
             ))}
           </div>
-          {mode === "paper" && (
+          {tradeMode === "paper" && (
             <div style={{
               margin: "8px 0 4px",
               fontSize: 9,
@@ -704,8 +733,13 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
 
       {/* FOOTER */}
       <div className="footer">
-        <span>ALL CRYPTO · 72H MARKETS · {tradesHr} TRADES/HR · {winRate}% WIN · {edge.toFixed(2)}% EDGE · KELLY 75% · MAX POS 10%</span>
-        <span>${DEP.toLocaleString()} → ${Math.round(bal).toLocaleString()} · ⚠ HIGH RISK MODE — MAX AGGRESSION</span>
+        <span>ALL CRYPTO · 5-MIN WINDOWS · {tradesHr} TRADES/HR · {winRate}% WIN · {edge.toFixed(2)}% EDGE · KELLY 75% · MAX POS 10%</span>
+        <span>
+          ${DEP.toLocaleString()} → ${Math.round(bal).toLocaleString()}
+          {tradeMode === "live"
+            ? " · ⚠ LIVE USDC · $1.00 CAP · 3 POS MAX"
+            : " · PAPER SIMULATION"}
+        </span>
       </div>
     </div>
   );

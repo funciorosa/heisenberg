@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import bot as bot_module
 from bot import HeisenbergBot, PipelineSignal
+from order_executor import OrderExecutor, OrderRequest
 
 load_dotenv()
 logger = logging.getLogger("api_server")
@@ -49,7 +50,9 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 _STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "100"))
+_LIVE_MODE = os.getenv("PAPER_TRADING", "true").lower() == "false"
 bot_instance = HeisenbergBot(bankroll=_STARTING_CAPITAL)
+executor = OrderExecutor()  # reads POLY_RELAYER_API_KEY / POLY_RELAYER_ADDRESS from env
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -68,6 +71,9 @@ bot_state: dict[str, Any] = {
     "signals": [],
     "stream": [],
     "expected_edge": 0.0,
+    "mode": "live" if _LIVE_MODE else "paper",
+    "balance_floor_alert": False,
+    "positions_open": 0,
     "status": {
         "polymarket": "ONLINE",
         "bayes": "ONLINE",
@@ -272,9 +278,26 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     elapsed_hrs = max((time.time() - _cycle_start) / 3600, 1 / 3600)
     bot_state["trades_hr"] = int(_tradeable_count / elapsed_hrs)
 
-    # Paper-trade each tradeable signal
-    for s in tradeable:
-        _simulate_trade(s)
+    # Execute trades — live or paper
+    if _LIVE_MODE:
+        # Check balance floor
+        floor_ok = executor.check_balance_floor(bot_state["balance"])
+        bot_state["balance_floor_alert"] = not floor_ok
+        bot_state["positions_open"] = executor.open_position_count()
+
+        if floor_ok:
+            for s in tradeable:
+                asyncio.create_task(_place_live_order(s))
+        else:
+            bot_state["stream"].append({
+                "time": _format_time(),
+                "tag": "HALT",
+                "cl": "s-tag-r",
+                "msg": f"Balance floor hit ${bot_state['balance']:.2f} < $40 — paused",
+            })
+    else:
+        for s in tradeable:
+            _simulate_trade(s)
 
     # Build stream entries
     new_entries: list[dict] = []
@@ -316,6 +339,43 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     bot_state["signals"] = bot_state["signals"][-50:]
 
 
+async def _place_live_order(signal: PipelineSignal) -> None:
+    """Place a real Polymarket order for a tradeable signal."""
+    direction = "BUY" if signal.edge_signal.net_edge > 0 else "SELL"
+    price = signal.spread_data.ask if direction == "BUY" else signal.spread_data.bid
+
+    req = OrderRequest(
+        token_id=signal.token_id,
+        side=direction,
+        price=price,
+        size=min(signal.kelly_position_size if signal.kelly_position_size >= 0.50 else 1.00, 1.00),
+        net_edge=signal.edge_signal.net_edge,
+        z_score=signal.edge_signal.z_score,
+    )
+    result = await executor.place_order(req)
+
+    label = _short_label(signal.market_question)
+    if result.status in ("live", "matched"):
+        bot_state["total_trades"] += 1
+        bot_state["stream"].append({
+            "time": _format_time(),
+            "tag": "ORDER",
+            "cl": "s-tag-g",
+            "msg": f"{label} | {direction} ${result.size:.2f} @ {result.price:.4f} id={result.order_id[:8]}",
+        })
+        logger.info("LIVE ORDER: %s %s $%.2f @ %.4f", direction, label, result.size, result.price)
+    elif result.status == "skipped":
+        logger.debug("Order skipped: %s", result.message)
+    else:
+        bot_state["stream"].append({
+            "time": _format_time(),
+            "tag": "ERR",
+            "cl": "s-tag-r",
+            "msg": f"Order failed: {result.message[:50]}",
+        })
+    bot_state["positions_open"] = executor.open_position_count()
+
+
 # Register callback with bot module
 bot_module.on_cycle_complete = _on_cycle_complete
 
@@ -324,9 +384,15 @@ bot_module.on_cycle_complete = _on_cycle_complete
 # ---------------------------------------------------------------------------
 
 async def _broadcast_loop() -> None:
-    """Push bot_state snapshot to all connected WS clients every 1 second."""
+    """Push bot_state snapshot to all WS clients every 1s; expire stale orders every 30s."""
+    _expire_tick = 0
     while True:
         await asyncio.sleep(1)
+        _expire_tick += 1
+        if _LIVE_MODE and _expire_tick % 30 == 0:
+            await executor.expire_old_orders()
+            bot_state["positions_open"] = executor.open_position_count()
+
         if not _ws_clients:
             continue
         payload = json.dumps(bot_state)
@@ -345,6 +411,12 @@ async def _broadcast_loop() -> None:
 
 @app.on_event("startup")
 async def _startup() -> None:
+    if _LIVE_MODE:
+        cancelled = await executor.cancel_all()
+        logger.info("LIVE MODE — cancelled %d stale orders on startup.", cancelled)
+        logger.warning("*** LIVE TRADING ENABLED — REAL USDC ***")
+    else:
+        logger.info("PAPER TRADING MODE — no real orders will be placed.")
     asyncio.create_task(bot_instance.run())
     asyncio.create_task(_broadcast_loop())
     logger.info("HEISENBERG API started. Bot running. Broadcaster running.")
