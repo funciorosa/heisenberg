@@ -735,8 +735,8 @@ function Screen4({ onNext, onBack }) {
   const [polBal, setPolBal] = useState(null);
   const [mmError, setMmError] = useState(null);
   const [capital, setCapital] = useState(100);
-  const [apiKey, setApiKey] = useState("");
-  const [apiSecret, setApiSecret] = useState("");
+  const [relayerApiKey, setRelayerApiKey] = useState("");
+  const [relayerAddress, setRelayerAddress] = useState("");
   const [showApi, setShowApi] = useState(false);
   const [mode, setMode] = useState("paper");
   const [showLiveWarn, setShowLiveWarn] = useState(false);
@@ -813,7 +813,7 @@ function Screen4({ onNext, onBack }) {
   const truncate = addr => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : "";
   const maxPos = (capital * 0.02).toFixed(2);
 
-  const canLaunch = address && isPolygon && capital >= 10 && (mode === "paper" || (apiKey && apiSecret));
+  const canLaunch = address && isPolygon && capital >= 10 && (mode === "paper" || (relayerApiKey && relayerAddress));
 
   const launch = () => {
     if (!canLaunch) return;
@@ -821,8 +821,8 @@ function Screen4({ onNext, onBack }) {
       address,
       startingCapital: capital,
       mode,
-      apiKey,
-      apiSecret,
+      relayerApiKey,
+      relayerAddress,
       startTime: Date.now(),
     }));
     onNext({ address, startingCapital: capital, mode });
@@ -920,26 +920,30 @@ function Screen4({ onNext, onBack }) {
           {showApi && (
             <>
               <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, color: "#008f11", marginBottom: 4 }}>POLYMARKET API KEY</div>
+                <div style={{ fontSize: 10, color: "#008f11", marginBottom: 4 }}>POLYMARKET RELAYER API KEY</div>
                 <input
                   className="ws-input ws-input-full"
                   type="password"
-                  value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
+                  value={relayerApiKey}
+                  onChange={e => setRelayerApiKey(e.target.value)}
                   placeholder="0x..."
                 />
+                <div className="ws-api-note">
+                  Get this from polymarket.com → Settings → Claves API del Relayer → Crear nuevo
+                </div>
               </div>
               <div>
-                <div style={{ fontSize: 10, color: "#008f11", marginBottom: 4 }}>POLYMARKET API SECRET</div>
+                <div style={{ fontSize: 10, color: "#008f11", marginBottom: 4 }}>RELAYER ADDRESS</div>
                 <input
                   className="ws-input ws-input-full"
-                  type="password"
-                  value={apiSecret}
-                  onChange={e => setApiSecret(e.target.value)}
-                  placeholder="secret..."
+                  type="text"
+                  value={relayerAddress}
+                  onChange={e => setRelayerAddress(e.target.value)}
+                  placeholder="0x..."
                 />
+                <div className="ws-api-note">The signer address shown on the same page.</div>
               </div>
-              <div className="ws-api-note">Required only for LIVE trading.</div>
+              <div className="ws-api-note" style={{ marginTop: 8 }}>Required only for LIVE trading.</div>
             </>
           )}
         </div>
@@ -977,9 +981,9 @@ function Screen4({ onNext, onBack }) {
               )}
             </div>
           </div>
-          {mode === "live" && !apiKey && (
+          {mode === "live" && !relayerApiKey && (
             <div style={{ color: "#ffe600", fontSize: 10, marginTop: 8 }}>
-              ⚠ API key required for live trading.
+              ⚠ Relayer API key required for live trading.
             </div>
           )}
         </div>
