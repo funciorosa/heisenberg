@@ -96,29 +96,32 @@ _ws_clients: set[WebSocket] = set()
 # ---------------------------------------------------------------------------
 
 def _simulate_trade(signal: PipelineSignal) -> None:
-    """Simulate a conservative realistic paper trade outcome."""
+    """Aggressive paper trade simulation — full market payout model."""
     global _peak_balance, _wins, _losses, _tradeable_count
 
     balance = bot_state["balance"]
-    size = min(signal.kelly_position_size, balance * 0.02)
+    # Position size = Kelly sizing, max 10% of live bankroll (compounding)
+    size = min(signal.kelly_position_size, balance * 0.10)
     if size <= 0:
         return
 
+    ask = signal.spread_data.ask
     mid = signal.mid_price
-    if mid <= 0 or mid >= 1:
+    if ask <= 0 or ask >= 1 or mid <= 0 or mid >= 1:
         return
 
-    # Conservative win probability — 52–60% regardless of model confidence
-    # Prevents the model from congratulating itself too aggressively
-    posterior = max(0.52, min(0.60, mid + signal.edge_signal.net_edge * 3))
+    # Win probability = Bayesian posterior (no artificial cap)
+    # Approximated from mid + net_edge contribution
+    posterior = min(0.95, max(0.05, mid + signal.edge_signal.net_edge * 8))
+    fee = 0.007 * size  # 7bps taker fee
 
     if random.random() < posterior:
-        # Win: 8% gain on position (conservative, after fees + slippage)
-        pnl = size * 0.08
+        # YES resolves to 1.0: full payout minus fee
+        pnl = size * (1.0 / ask - 1.0) - fee
         _wins += 1
     else:
-        # Lose: 10% loss on position (includes fees + adverse fill)
-        pnl = -size * 0.10
+        # NO resolves: lose full stake plus fee
+        pnl = -size - fee
         _losses += 1
 
     bot_state["balance"] = round(balance + pnl, 2)

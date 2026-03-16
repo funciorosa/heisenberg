@@ -528,6 +528,97 @@ class PolymarketCLOBClient:
         logger.warning("fetch_btc_5min_markets: no markets with parseable end_date")
         return all_btc[:5]
 
+    async def fetch_short_horizon_markets(self) -> list[MarketInfo]:
+        """Fetch ALL short-term crypto markets resolving within 72 hours.
+
+        Queries the Gamma API for all crypto events, extracts every market
+        (not just BTC), filters to those with end_date < now+72h, and sorts
+        by volume descending so the most liquid markets are processed first.
+
+        Returns
+        -------
+        list of MarketInfo sorted by volume descending.
+        """
+        from datetime import datetime, timezone, timedelta
+        import json as _json
+
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=72)
+
+        results: list[MarketInfo] = []
+        seen: set[str] = set()
+
+        try:
+            data = await self._gamma_get(
+                "/events",
+                params={"closed": "false", "limit": 200, "tag_slug": "crypto"},
+            )
+            events = data if isinstance(data, list) else data.get("data", [])
+
+            for event in events:
+                for mkt in event.get("markets", []):
+                    if not mkt.get("acceptingOrders", False):
+                        continue
+
+                    cid = mkt.get("conditionId") or mkt.get("condition_id") or ""
+                    if not cid or cid in seen:
+                        continue
+
+                    # Parse end_date
+                    raw_end = mkt.get("endDateIso") or mkt.get("endDate") or ""
+                    if not raw_end:
+                        continue
+                    try:
+                        raw = raw_end.rstrip("Z").split("+")[0]
+                        end_dt = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+                    except (ValueError, AttributeError):
+                        continue
+
+                    if end_dt <= now or end_dt > cutoff:
+                        continue
+
+                    seen.add(cid)
+                    raw_token_ids = mkt.get("clobTokenIds") or mkt.get("tokens") or []
+                    if isinstance(raw_token_ids, str):
+                        try:
+                            raw_token_ids = _json.loads(raw_token_ids)
+                        except Exception:
+                            raw_token_ids = []
+                    tokens = [{"token_id": tid} for tid in raw_token_ids if isinstance(tid, str)]
+
+                    question = mkt.get("question") or mkt.get("title") or ""
+                    volume = float(mkt.get("volumeNum") or mkt.get("volume") or 0)
+
+                    results.append(MarketInfo(
+                        condition_id=cid,
+                        question=question,
+                        end_date=raw_end,
+                        volume=volume,
+                        active=not mkt.get("closed", False),
+                        tokens=tokens,
+                        raw=mkt,
+                    ))
+
+        except Exception as exc:
+            logger.warning("fetch_short_horizon_markets Gamma API failed (%s) — no markets", exc)
+            return []
+
+        # Sort by volume descending — most liquid first
+        results.sort(key=lambda m: m.volume, reverse=True)
+
+        logger.info(
+            "fetch_short_horizon_markets: %d crypto markets resolving within 72h",
+            len(results),
+        )
+        # Log top 10 by volume
+        for i, m in enumerate(results[:10], 1):
+            logger.info(
+                "  #%d vol=%.0f  %s",
+                i, m.volume, m.question[:70],
+            )
+
+        return results
+
     async def fetch_mid_prices(self, token_ids: list[str]) -> dict[str, float]:
         """Fetch mid-point prices for a batch of tokens.
 

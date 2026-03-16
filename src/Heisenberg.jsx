@@ -704,8 +704,8 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
 
       {/* FOOTER */}
       <div className="footer">
-        <span>LIMIT ORDERS · 5-MIN BTC · {tradesHr} TRADES/HR · {winRate}% WIN · {edge.toFixed(2)}% EDGE · HEISENBERG v1.0</span>
-        <span>${DEP.toLocaleString()} → ${Math.round(bal).toLocaleString()} · {mode?.toUpperCase() ?? "PAPER"}</span>
+        <span>ALL CRYPTO · 72H MARKETS · {tradesHr} TRADES/HR · {winRate}% WIN · {edge.toFixed(2)}% EDGE · KELLY 75% · MAX POS 10%</span>
+        <span>${DEP.toLocaleString()} → ${Math.round(bal).toLocaleString()} · ⚠ HIGH RISK MODE — MAX AGGRESSION</span>
       </div>
     </div>
   );

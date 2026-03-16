@@ -50,13 +50,13 @@ logger = logging.getLogger("HEISENBERG")
 # Pipeline config
 # ---------------------------------------------------------------------------
 
-POLL_INTERVAL_SECONDS = 5        # How often to scan markets
-MAX_MARKETS_PER_CYCLE = 10       # Cap to avoid rate limits
+POLL_INTERVAL_SECONDS = 2        # Aggressive: scan every 2 seconds
+MAX_MARKETS_PER_CYCLE = 0        # 0 = no cap, scan everything
 BANKROLL = 1_000.0               # Simulated capital (no real money)
-KELLY_FRACTION = 0.25            # Fractional Kelly multiplier
-MIN_EDGE_BPS = 10                # Lowered for calibration (was 50)
-MIN_Z_SCORE = 0.5                # Lowered for calibration (was 1.5)
-MAX_SPREAD_BPS = 1000            # Maximum acceptable spread (relaxed)
+KELLY_FRACTION = 0.75            # Aggressive Kelly (was 0.25)
+MIN_EDGE_BPS = 20                # Aggressive: lower threshold (was 50)
+MIN_Z_SCORE = 0.8                # Aggressive: lower threshold (was 1.5)
+MAX_SPREAD_BPS = 800             # Relaxed spread tolerance
 
 # Market health filters — applied per token after book fetch
 MID_PRICE_MIN = 0.05             # Skip near-resolved NO (< 5%)
@@ -119,7 +119,7 @@ class HeisenbergBot:
             min_z_score=MIN_Z_SCORE,
             max_spread_bps=MAX_SPREAD_BPS,
         )
-        self.kelly = KellySizer(kelly_fraction=KELLY_FRACTION, max_position_pct=0.05)
+        self.kelly = KellySizer(kelly_fraction=KELLY_FRACTION, max_position_pct=0.10)
         self.stoikov = StoikovQuoter(StoikovParams(gamma=0.1, sigma=0.02, T=300.0))
 
         # Rolling price history per token for z-score computation
@@ -247,10 +247,12 @@ class HeisenbergBot:
     # ------------------------------------------------------------------
 
     async def _fetch_active_btc_markets(self) -> list[MarketInfo]:
-        """Fetch BTC 5-min markets from Polymarket."""
+        """Fetch short-horizon crypto markets from Polymarket, sorted by volume."""
         try:
-            markets = await self.client.fetch_btc_5min_markets()
-            return markets[:MAX_MARKETS_PER_CYCLE]
+            markets = await self.client.fetch_short_horizon_markets()
+            if MAX_MARKETS_PER_CYCLE > 0:
+                return markets[:MAX_MARKETS_PER_CYCLE]
+            return markets
         except Exception as exc:
             logger.warning("Market discovery failed: %s", exc)
             return []
