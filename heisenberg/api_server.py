@@ -99,24 +99,25 @@ def _simulate_trade(signal: PipelineSignal) -> None:
     global _peak_balance, _wins, _losses, _tradeable_count
 
     balance = bot_state["balance"]
-    size = min(signal.kelly_position_size, balance * 0.02, balance * 0.1)
+    size = min(signal.kelly_position_size, balance * 0.02)
     if size <= 0:
         return
 
-    p = signal.mid_price
-    if p <= 0 or p >= 1:
+    ask = signal.spread_data.ask   # market ask price we'd pay
+    mid = signal.mid_price
+    if ask <= 0 or ask >= 1 or mid <= 0 or mid >= 1:
         return
 
-    # Our edge: we believe true prob = p + net_edge adjustment
+    # Win probability = market mid + our edge (bounded to reasonable range)
     net_edge = signal.edge_signal.net_edge
-    true_prob = max(0.3, min(0.85, p + net_edge * 12))
+    win_prob = max(0.35, min(0.80, mid + net_edge * 5))
 
-    if random.random() < true_prob:
-        # YES resolves: receive 1.0 per token, paid p per token
-        pnl = size * (1.0 - p) / p
+    if random.random() < win_prob:
+        # YES resolves to 1.0: profit = size * (1/ask - 1)
+        pnl = size * (1.0 / ask - 1.0)
         _wins += 1
     else:
-        # NO resolves: tokens worthless
+        # NO resolves: lose the stake
         pnl = -size
         _losses += 1
 
@@ -167,6 +168,17 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     _cycle_count += 1
     _markets_last_cycle = len(signals)
 
+    if signals:
+        z_vals = [s.edge_signal.z_score for s in signals]
+        net_vals = [s.edge_signal.net_edge for s in signals]
+        logger.info(
+            "Cycle %d — %d tokens | z=[%.3f..%.3f] net=[%.4f..%.4f] | %d tradeable",
+            _cycle_count, len(signals),
+            min(z_vals), max(z_vals),
+            min(net_vals), max(net_vals),
+            sum(1 for s in signals if s.edge_signal.is_tradeable),
+        )
+
     tradeable = [s for s in signals if s.edge_signal.is_tradeable]
     total_now = bot_state["total_trades"] + len(signals)
     bot_state["total_trades"] = total_now
@@ -190,12 +202,13 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     # Build stream entries
     new_entries: list[dict] = []
     for s in signals[:8]:  # cap to avoid flood
+        q_short = s.market_question[:30].strip()
         if s.edge_signal.is_tradeable:
-            msg = f"z={s.edge_signal.z_score:+.2f} ev={s.edge_signal.expected_value:+.4f} size=${s.kelly_position_size:.2f}"
-            new_entries.append(_signal_to_stream(s, "SIGNAL", "s-tag-g", msg))
+            msg = f"{q_short} | z={s.edge_signal.z_score:+.3f} ev={s.edge_signal.expected_value:+.4f} size=${s.kelly_position_size:.2f}"
+            new_entries.append({"time": _format_time(), "tag": "SIGNAL", "cl": "s-tag-g", "msg": msg})
         else:
-            msg = f"z={s.edge_signal.z_score:+.2f} SKIP mid={s.mid_price:.3f}"
-            new_entries.append(_signal_to_stream(s, "SKIP", "s-tag-b", msg))
+            msg = f"{q_short} | z={s.edge_signal.z_score:+.3f} mid={s.mid_price:.3f} net={s.edge_signal.net_edge:+.4f}"
+            new_entries.append({"time": _format_time(), "tag": "SKIP", "cl": "s-tag-b", "msg": msg})
 
     # Append SCAN heartbeat
     new_entries.append({

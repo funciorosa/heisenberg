@@ -54,9 +54,14 @@ POLL_INTERVAL_SECONDS = 5        # How often to scan markets
 MAX_MARKETS_PER_CYCLE = 10       # Cap to avoid rate limits
 BANKROLL = 1_000.0               # Simulated capital (no real money)
 KELLY_FRACTION = 0.25            # Fractional Kelly multiplier
-MIN_EDGE_BPS = 50                # Minimum net edge to consider a signal
-MIN_Z_SCORE = 1.5                # Minimum z-score threshold
-MAX_SPREAD_BPS = 500             # Maximum acceptable spread
+MIN_EDGE_BPS = 10                # Lowered for calibration (was 50)
+MIN_Z_SCORE = 0.5                # Lowered for calibration (was 1.5)
+MAX_SPREAD_BPS = 1000            # Maximum acceptable spread (relaxed)
+
+# Market health filters — applied per token after book fetch
+MID_PRICE_MIN = 0.05             # Skip near-resolved NO (< 5%)
+MID_PRICE_MAX = 0.95             # Skip near-resolved YES (> 95%)
+MAX_SPREAD_FILTER = 0.10         # Skip illiquid books (spread > 10%)
 
 
 @dataclass
@@ -142,6 +147,21 @@ class HeisenbergBot:
         mid = book.mid_price
         bid = book.best_bid
         ask = book.best_ask
+        spread = ask - bid
+
+        # Filter near-resolved markets and illiquid books
+        if mid < MID_PRICE_MIN or mid > MID_PRICE_MAX:
+            logger.debug(
+                "Skipping near-resolved token %s mid=%.3f (out of [%.2f, %.2f])",
+                token_id[:12], mid, MID_PRICE_MIN, MID_PRICE_MAX,
+            )
+            return None
+        if spread > MAX_SPREAD_FILTER:
+            logger.debug(
+                "Skipping illiquid token %s spread=%.3f > %.2f",
+                token_id[:12], spread, MAX_SPREAD_FILTER,
+            )
+            return None
 
         # 2. Update rolling price history
         history = self._price_history.setdefault(token_id, [])
@@ -175,7 +195,13 @@ class HeisenbergBot:
         spread_data = self.edge_filter.compute_spread(bid, ask)
 
         # 6. Z-score + EV + net edge
-        z_score = self.edge_filter.compute_z_score(mid, history[:-1], window=60)
+        z_score = self.edge_filter.compute_z_score(mid, history[:-1], window=20)
+        logger.debug(
+            "token=%s mid=%.3f z=%.3f ev=%.4f hist_len=%d",
+            token_id[:12], mid, z_score,
+            0.0,  # ev computed below
+            len(history),
+        )
         ev = self.edge_filter.compute_ev(
             prob=posterior,
             odds_yes=1.0 / ask if ask > 0 else 0.0,
@@ -183,6 +209,12 @@ class HeisenbergBot:
             fee_bps=20,
         )
         edge_signal = self.edge_filter.filter(spread_data, z_score, ev, posterior)
+        logger.info(
+            "  %-12s mid=%.3f spread=%.3f z=%+.3f ev=%+.4f net=%+.4f %s",
+            token_id[:12], mid, spread, z_score, ev,
+            edge_signal.net_edge,
+            "SIGNAL" if edge_signal.is_tradeable else "skip",
+        )
 
         # 7. Kelly position sizing
         kelly_input = KellyInput(
