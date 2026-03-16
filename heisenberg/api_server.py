@@ -91,6 +91,9 @@ _markets_last_cycle: int = 0
 # Connected WebSocket clients
 _ws_clients: set[WebSocket] = set()
 
+# Markets snapshot — updated each cycle for /markets endpoint
+_markets_snapshot: list[dict] = []
+
 # ---------------------------------------------------------------------------
 # Paper trade simulation
 # ---------------------------------------------------------------------------
@@ -111,7 +114,6 @@ def _simulate_trade(signal: PipelineSignal) -> None:
         return
 
     # Win probability = Bayesian posterior (no artificial cap)
-    # Approximated from mid + net_edge contribution
     posterior = min(0.95, max(0.05, mid + signal.edge_signal.net_edge * 8))
     fee = 0.007 * size  # 7bps taker fee
 
@@ -119,13 +121,32 @@ def _simulate_trade(signal: PipelineSignal) -> None:
         # YES resolves to 1.0: full payout minus fee
         pnl = size * (1.0 / ask - 1.0) - fee
         _wins += 1
+        result = "WIN"
     else:
         # NO resolves: lose full stake plus fee
         pnl = -size - fee
         _losses += 1
+        result = "LOSE"
 
     bot_state["balance"] = round(balance + pnl, 2)
+    bot_state["total_trades"] = bot_state["total_trades"] + 1
     _tradeable_count += 1
+
+    # Console log
+    q_short = signal.market_question[:40]
+    logger.info(
+        "PAPER TRADE: market=%r size=$%.2f result=%s pnl=$%+.2f  bal=$%.2f",
+        q_short, size, result, pnl, bot_state["balance"],
+    )
+
+    # Push [EXEC] stream entry
+    cl = "s-tag-g" if result == "WIN" else "s-tag-r"
+    bot_state["stream"].append({
+        "time": _format_time(),
+        "tag": "EXEC",
+        "cl": cl,
+        "msg": f"{q_short[:28]} | {result} size=${size:.2f} pnl=${pnl:+.2f}",
+    })
 
     # Update peak / max drawdown
     if bot_state["balance"] > _peak_balance:
@@ -148,7 +169,7 @@ def _simulate_trade(signal: PipelineSignal) -> None:
     if total > 0:
         wr = _wins / total
         bot_state["win_rate"] = round(wr * 100, 1)
-        # Expected edge per trade: win%*8% gain - loss%*10% loss
+        # Expected edge per trade
         bot_state["expected_edge"] = round(wr * 0.08 - (1 - wr) * 0.10, 4)
 
     # ROI
@@ -170,24 +191,35 @@ def _signal_to_stream(signal: PipelineSignal, tag: str, cl: str, msg: str) -> di
 # ---------------------------------------------------------------------------
 
 def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
-    global _tradeable_count, _cycle_count, _markets_last_cycle
+    global _tradeable_count, _cycle_count, _markets_last_cycle, _markets_snapshot
     _cycle_count += 1
     _markets_last_cycle = len(signals)
 
     if signals:
         z_vals = [s.edge_signal.z_score for s in signals]
         net_vals = [s.edge_signal.net_edge for s in signals]
+        tradeable_n = sum(1 for s in signals if s.edge_signal.is_tradeable)
         logger.info(
             "Cycle %d — %d tokens | z=[%.3f..%.3f] net=[%.4f..%.4f] | %d tradeable",
             _cycle_count, len(signals),
             min(z_vals), max(z_vals),
             min(net_vals), max(net_vals),
-            sum(1 for s in signals if s.edge_signal.is_tradeable),
+            tradeable_n,
         )
 
     tradeable = [s for s in signals if s.edge_signal.is_tradeable]
-    total_now = bot_state["total_trades"] + len(signals)
-    bot_state["total_trades"] = total_now
+
+    # Update markets snapshot for /markets endpoint
+    _markets_snapshot = [
+        {
+            "question": s.market_question[:80],
+            "token_id": s.token_id,
+            "mid_price": round(s.mid_price, 4),
+            "z": round(s.edge_signal.z_score, 3),
+            "tradeable": s.edge_signal.is_tradeable,
+        }
+        for s in signals
+    ]
 
     # Collect edges
     for s in signals:
@@ -300,6 +332,15 @@ async def get_status():
 @app.get("/signals")
 async def get_signals():
     return bot_state["signals"][-50:]
+
+
+@app.get("/markets")
+async def get_markets():
+    return {
+        "cycle": _cycle_count,
+        "count": len(_markets_snapshot),
+        "markets": _markets_snapshot,
+    }
 
 
 # ---------------------------------------------------------------------------
