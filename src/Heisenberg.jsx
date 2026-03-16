@@ -384,45 +384,119 @@ function PLCurve({ hist }) {
   );
 }
 
-export default function Heisenberg() {
-  const DEP = 2050;
-  const [block, setBlock]       = useState(82355);
-  const [vol, setVol]           = useState(3.72);
-  const [edge, setEdge]         = useState(11.2);
-  const [bal, setBal]           = useState(6126);
-  const [hist, setHist]         = useState([2050, 2200, 2500, 2900, 3400, 4100, 5000, 6126]);
-  const [stream, setStream]     = useState(() => Array.from({ length: 28 }, genMsg));
-  const [prior, setPrior]       = useState(0.436);
-  const [post, setPost]         = useState(0.548);
-  const [ev, setEv]             = useState(0.0178);
-  const [cost, setCost]         = useState(0.0126);
-  const [net, setNet]           = useState(0.0052);
-  const [zscore, setZscore]     = useState(-1.87);
-  const [q, setQ]               = useState(1.1);
-  const [gamma, setGamma]       = useState(0.19);
-  const [fstar, setFstar]       = useState(0.0097);
-  const [winRate, setWinRate]   = useState(60.0);
-  const [tradesHr, setTradesHr] = useState(273);
-  const [total, setTotal]       = useState(3753);
-  const [sharpe, setSharpe]     = useState(3.84);
-  const [maxDD, setMaxDD]       = useState(4.2);
-  const [floats, setFloats]     = useState([
+const API_URL = (import.meta.env.VITE_BOT_API_URL || "http://localhost:8000").replace(/\/$/, "");
+
+export default function Heisenberg({ address, startingCapital = 100, mode = "paper" }) {
+  const DEP = startingCapital;
+
+  // ── visual-only state (stays simulated) ──────────────────────────
+  const [block, setBlock]   = useState(82355);
+  const [vol, setVol]       = useState(3.72);
+  const [prior, setPrior]   = useState(0.436);
+  const [post, setPost]     = useState(0.548);
+  const [ev, setEv]         = useState(0.0178);
+  const [cost, setCost]     = useState(0.0126);
+  const [net, setNet]       = useState(0.0052);
+  const [zscore, setZscore] = useState(-1.87);
+  const [q, setQ]           = useState(1.1);
+  const [gamma, setGamma]   = useState(0.19);
+  const [fstar, setFstar]   = useState(0.0097);
+  const [floats, setFloats] = useState([
     { id: 1, v: "+$23.44", green: true,  top: "28%", right: "32%" },
     { id: 2, v: "-$11.20", green: false, top: "44%", right: "22%" },
     { id: 3, v: "+$29.15", green: true,  top: "19%", right: "14%" },
     { id: 4, v: "+$17.35", green: true,  top: "58%", right: "38%" },
   ]);
-  const streamRef = useRef(null);
+
+  // ── live data state (driven by WebSocket) ────────────────────────
+  const [edge, setEdge]         = useState(0.0);
+  const [bal, setBal]           = useState(DEP);
+  const [hist, setHist]         = useState([DEP]);
+  const [stream, setStream]     = useState(() => Array.from({ length: 12 }, genMsg));
+  const [winRate, setWinRate]   = useState(0.0);
+  const [tradesHr, setTradesHr] = useState(0);
+  const [total, setTotal]       = useState(0);
+  const [sharpe, setSharpe]     = useState(0.0);
+  const [maxDD, setMaxDD]       = useState(0.0);
+  const [wsStatus, setWsStatus] = useState("connecting"); // "live" | "reconnecting" | "connecting"
+
+  const streamRef   = useRef(null);
+  const wsRef       = useRef(null);
+  const retryRef    = useRef(null);
+  const connectedRef = useRef(false);
+
+  // ── WebSocket connection ──────────────────────────────────────────
+  const connectWs = useCallback(() => {
+    const wsUrl = API_URL.replace(/^http/, "ws") + "/stream";
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        connectedRef.current = true;
+        setWsStatus("live");
+      };
+
+      ws.onmessage = (e) => {
+        let data;
+        try { data = JSON.parse(e.data); } catch { return; }
+        if (data.ping) return;
+
+        if (data.balance != null) {
+          setBal(data.balance);
+          setHist((h) => [...h.slice(-70), data.balance]);
+        }
+        if (data.edge != null)        setEdge(data.edge);
+        if (data.win_rate != null)    setWinRate(data.win_rate);
+        if (data.trades_hr != null)   setTradesHr(data.trades_hr);
+        if (data.total_trades != null) setTotal(data.total_trades);
+        if (data.sharpe != null)      setSharpe(data.sharpe);
+        if (data.max_dd != null)      setMaxDD(data.max_dd);
+        if (data.stream?.length)      setStream(data.stream.slice(-90));
+        if (data.balance != null && Math.random() < 0.2) {
+          const delta = (data.balance - bal).toFixed(2);
+          const pos = delta >= 0;
+          setFloats((f) => f.map((x, i) =>
+            i === Math.floor(Math.random() * f.length)
+              ? { ...x, v: (pos ? "+$" : "-$") + Math.abs(delta), green: pos }
+              : x
+          ));
+        }
+      };
+
+      ws.onclose = () => {
+        connectedRef.current = false;
+        setWsStatus("reconnecting");
+        retryRef.current = setTimeout(connectWs, 5000);
+      };
+
+      ws.onerror = () => ws.close();
+    } catch {
+      setWsStatus("reconnecting");
+      retryRef.current = setTimeout(connectWs, 5000);
+    }
+  }, [API_URL]);
 
   useEffect(() => {
-    const si = setInterval(() => {
-      setStream((p) => [...p.slice(-90), genMsg()]);
-    }, 200);
+    connectWs();
+    return () => {
+      clearTimeout(retryRef.current);
+      wsRef.current?.close();
+    };
+  }, [connectWs]);
 
-    const mi = setInterval(() => {
+  // ── Visual-only simulation intervals ────────────────────────────
+  useEffect(() => {
+    // Fake stream fallback — only fires when disconnected
+    const si = setInterval(() => {
+      if (!connectedRef.current) {
+        setStream((p) => [...p.slice(-90), genMsg()]);
+      }
+    }, 400);
+
+    const vi = setInterval(() => {
       setBlock((b) => b + Math.floor(rnd(1, 3)));
       setVol((v) => Math.max(1, +(v + rnd(-0.04, 0.04)).toFixed(2)));
-      setEdge((e) => Math.max(8, Math.min(18, +(e + rnd(-0.12, 0.12)).toFixed(2))));
       setPrior((p) => Math.max(0.3, Math.min(0.7, +(p + rnd(-0.004, 0.004)).toFixed(3))));
       setPost((p) => Math.max(0.35, Math.min(0.75, +(p + rnd(-0.003, 0.007)).toFixed(3))));
       setEv((v) => Math.max(0.005, Math.min(0.06, +(v + rnd(-0.001, 0.002)).toFixed(4))));
@@ -432,28 +506,9 @@ export default function Heisenberg() {
       setQ((v) => Math.max(0.5, Math.min(2.5, +(v + rnd(-0.02, 0.04)).toFixed(2))));
       setGamma((v) => Math.max(0.05, Math.min(0.5, +(v + rnd(-0.004, 0.007)).toFixed(3))));
       setFstar((v) => Math.max(0.003, Math.min(0.03, +(v + rnd(-0.0005, 0.001)).toFixed(4))));
-      setWinRate((v) => Math.max(50, Math.min(70, +(v + rnd(-0.25, 0.25)).toFixed(1))));
-      setTradesHr((v) => Math.max(200, Math.min(320, Math.floor(v + rnd(-2, 2)))));
-      setTotal((v) => v + Math.floor(rnd(0, 4)));
-      setSharpe((v) => Math.max(2, Math.min(6, +(v + rnd(-0.04, 0.04)).toFixed(2))));
-      setMaxDD((v) => Math.max(1, Math.min(8, +(v + rnd(-0.04, 0.04)).toFixed(1))));
-      setBal((prev) => {
-        const next = prev + prev * rnd(0.00008, 0.0006);
-        setHist((h) => [...h.slice(-70), next]);
-        return next;
-      });
-      if (Math.random() < 0.15) {
-        setFloats((f) =>
-          f.map((x) => ({
-            ...x,
-            v: (Math.random() > 0.3 ? "+$" : "-$") + f2(rnd(5, 50)),
-            green: Math.random() > 0.3,
-          }))
-        );
-      }
     }, 700);
 
-    return () => { clearInterval(si); clearInterval(mi); };
+    return () => { clearInterval(si); clearInterval(vi); };
   }, []);
 
   useEffect(() => {
@@ -475,8 +530,20 @@ export default function Heisenberg() {
         <div className="topbar-right">
           <span>BLOCK {block}</span>
           <span>VOL ${vol.toFixed(2)}B</span>
-          <span>EDGE {edge.toFixed(1)}%</span>
-          <div className="live-badge"><span className="live-dot" />LIVE</div>
+          <span>EDGE {edge.toFixed(2)}%</span>
+          {wsStatus === "live" ? (
+            <div className="live-badge"><span className="live-dot" />LIVE</div>
+          ) : wsStatus === "reconnecting" ? (
+            <div className="live-badge" style={{ color: "var(--yellow)" }}>
+              <span className="live-dot" style={{ background: "var(--yellow)", boxShadow: "0 0 6px var(--yellow)" }} />
+              RECONNECTING...
+            </div>
+          ) : (
+            <div className="live-badge" style={{ color: "var(--green3)" }}>
+              <span className="live-dot" style={{ background: "var(--green3)", boxShadow: "none" }} />
+              CONNECTING...
+            </div>
+          )}
         </div>
       </div>
 
@@ -566,7 +633,7 @@ export default function Heisenberg() {
           <div className="mets">
             {[
               ["Balance", `$${Math.round(bal).toLocaleString()}`, true],
-              ["Deposit", "$2,050", false],
+              ["Deposit", `$${DEP.toLocaleString()}`, false],
               ["ROI", `${roi}%`, true],
               ["Win Rate", `${winRate}%`, false],
               ["Edge", `${edge.toFixed(2)}%`, false],
@@ -609,7 +676,7 @@ export default function Heisenberg() {
         <div className="bot-panel">
           <div className="bot-title">P&amp;L Curve</div>
           <div className="pl-num">${Math.round(bal).toLocaleString()}</div>
-          <div className="pl-sub">from $2,050 · ROI {roi}%</div>
+          <div className="pl-sub">from ${DEP.toLocaleString()} · ROI {roi}%</div>
           <div className="pl-svg-wrap">
             <PLCurve hist={hist} />
           </div>
@@ -622,7 +689,7 @@ export default function Heisenberg() {
       {/* FOOTER */}
       <div className="footer">
         <span>LIMIT ORDERS · 5-MIN BTC · {tradesHr} TRADES/HR · {winRate}% WIN · {edge.toFixed(2)}% EDGE · HEISENBERG v1.0</span>
-        <span>${DEP.toLocaleString()} → ${Math.round(bal).toLocaleString()} · LIVE</span>
+        <span>${DEP.toLocaleString()} → ${Math.round(bal).toLocaleString()} · {mode?.toUpperCase() ?? "PAPER"}</span>
       </div>
     </div>
   );

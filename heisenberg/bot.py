@@ -22,9 +22,14 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from polymarket_client import PolymarketCLOBClient, OrderBook, MarketInfo
+
+# ---------------------------------------------------------------------------
+# Cycle callback — set by api_server.py to receive live updates
+# ---------------------------------------------------------------------------
+on_cycle_complete: Optional[Callable] = None
 from bayesian_model import BayesianModel, MarketFeatures, compute_ewma_vol
 from edge_filter import EdgeFilter, SpreadData, EdgeSignal
 from kelly_sizing import KellySizer, KellyInput
@@ -255,6 +260,13 @@ class HeisenbergBot:
             "Cycle %d complete — %d tokens scanned, %d tradeable signals",
             cycle_num, len(signals), len(tradeable),
         )
+
+        if on_cycle_complete is not None:
+            try:
+                on_cycle_complete(signals)
+            except Exception as cb_exc:
+                logger.debug("on_cycle_complete error: %s", cb_exc)
+
         return signals
 
     # ------------------------------------------------------------------
