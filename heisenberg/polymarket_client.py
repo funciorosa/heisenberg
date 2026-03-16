@@ -529,28 +529,32 @@ class PolymarketCLOBClient:
         return all_btc[:5]
 
     async def fetch_short_horizon_markets(self) -> list[MarketInfo]:
-        """Fetch active crypto 'Up or Down' markets (BTC/ETH/SOL/XRP/etc.).
+        """Fetch 5-minute and 15-minute crypto Up/Down windows (soonest first).
 
-        These are the hourly and sub-hourly directional markets on Polymarket:
-          - "Bitcoin Up or Down - March 16, 4PM ET"  ($800K+ liquidity)
-          - "Ethereum Up or Down - March 16, 5PM ET" ($600K+ liquidity)
-          - 5-minute and 15-minute windows (~$30K each)
+        Target market format:
+          "Bitcoin Up or Down - March 16, 7:20PM-7:25PM ET"  (5-min)
+          "Bitcoin Up or Down - March 16, 7:30PM-7:45PM ET"  (15-min)
+
+        Excluded:
+          - Hourly: "Bitcoin Up or Down - March 16, 4PM ET"  (no colon in time)
+          - Daily:  "Bitcoin Up or Down on March 17?"
 
         Strategy:
-          1. Pull all crypto events sorted by liquidity DESC.
-          2. Keep events whose title contains "up or down" (case-insensitive).
-          3. For each, extract the single market + clobTokenIds.
-          4. Filter: must not be closed, must have tokens, endDate > now.
-          5. Sort by liquidity DESC (most liquid first).
-          6. If no "up or down" markets found, fall back to ALL crypto events
-             resolving within 72h.
+          1. Pull all crypto events from Gamma API sorted by endDate ASC.
+          2. Filter title: "up or down" + time-range pattern HH:MMxM-HH:MMxM.
+          3. Skip already-resolved (endDate <= now).
+          4. Return top 10 soonest-expiring.
 
         Returns
         -------
-        list of MarketInfo sorted by liquidity descending.
+        list of MarketInfo sorted by endDate ascending (soonest first), max 10.
         """
         import json as _json
-        from datetime import datetime, timezone, timedelta
+        import re
+        from datetime import datetime, timezone
+
+        # Matches "7:30PM-7:45PM" or "11:00PM-11:15PM" — time range with colon
+        _WINDOW_RE = re.compile(r"\d+:\d+[AP]M-\d+:\d+[AP]M", re.IGNORECASE)
 
         now = datetime.now(timezone.utc)
 
@@ -572,7 +576,7 @@ class PolymarketCLOBClient:
                     raw = []
             return [{"token_id": tid} for tid in raw if isinstance(tid, str)]
 
-        results: list[MarketInfo] = []
+        results: list[tuple[datetime, MarketInfo]] = []  # (end_dt, market)
         seen: set[str] = set()
 
         try:
@@ -589,8 +593,11 @@ class PolymarketCLOBClient:
             events = data if isinstance(data, list) else data.get("data", [])
 
             for event in events:
-                title = (event.get("title") or event.get("name") or "").lower()
-                if "up or down" not in title:
+                ev_title = event.get("title") or event.get("name") or ""
+                if "up or down" not in ev_title.lower():
+                    continue
+                # Must have a time-range pattern (excludes hourly and daily)
+                if not _WINDOW_RE.search(ev_title):
                     continue
 
                 for mkt in event.get("markets", []):
@@ -609,50 +616,51 @@ class PolymarketCLOBClient:
 
                     raw_end = mkt.get("endDate") or mkt.get("endDateIso") or None
                     end_dt = _parse_end(raw_end)
-                    if end_dt and end_dt <= now:
-                        continue  # already resolved
+                    if end_dt is None or end_dt <= now:
+                        continue  # skip resolved or undated
 
                     seen.add(cid)
-                    question = mkt.get("question") or event.get("title") or ""
+                    question = mkt.get("question") or ev_title or ""
                     liq = float(mkt.get("liquidityNum") or mkt.get("liquidity") or
                                 event.get("liquidity") or 0)
-                    vol = float(mkt.get("volumeNum") or mkt.get("volume") or 0)
 
-                    results.append(MarketInfo(
+                    results.append((end_dt, MarketInfo(
                         condition_id=cid,
                         question=question,
                         end_date=raw_end,
-                        volume=liq,  # sort by liquidity — best proxy for tradability
+                        volume=liq,
                         active=True,
                         tokens=tokens,
                         raw=mkt,
-                    ))
+                    )))
 
         except Exception as exc:
             logger.warning("fetch_short_horizon_markets Gamma API failed (%s)", exc)
             return []
 
-        # Sort by liquidity (stored in volume field) descending
-        results.sort(key=lambda m: m.volume, reverse=True)
+        # Sort soonest-expiring first, cap at 10
+        results.sort(key=lambda x: x[0])
+        top10 = [m for _, m in results[:10]]
 
-        if not results:
+        if not top10:
             logger.warning(
-                "fetch_short_horizon_markets: no 'Up or Down' markets found — "
-                "check Polymarket for active directional markets"
+                "fetch_short_horizon_markets: no 5/15-min Up/Down windows found"
             )
             return []
 
         logger.info(
-            "fetch_short_horizon_markets: %d active Up/Down markets", len(results)
+            "fetch_short_horizon_markets: %d 5/15-min windows (soonest first)",
+            len(top10),
         )
-        for i, m in enumerate(results[:10], 1):
+        for i, m in enumerate(top10, 1):
+            end_dt = _parse_end(m.end_date)
+            mins_left = int((end_dt - now).total_seconds() / 60) if end_dt else -1
             logger.info(
-                "  #%2d liq=%9.0f  tokens=%d  end=%-19s  %s",
-                i, m.volume, len(m.tokens),
-                (m.end_date or "None")[:19], m.question[:65],
+                "  #%2d %3dmin  tokens=%d  %s",
+                i, mins_left, len(m.tokens), m.question[:65],
             )
 
-        return results
+        return top10
 
     async def fetch_mid_prices(self, token_ids: list[str]) -> dict[str, float]:
         """Fetch mid-point prices for a batch of tokens.

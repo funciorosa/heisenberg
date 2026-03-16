@@ -77,6 +77,7 @@ class PipelineSignal:
     reservation_price: float
     bid_quote: float
     ask_quote: float
+    end_date: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
 
     def summary(self) -> str:
@@ -130,7 +131,7 @@ class HeisenbergBot:
     # ------------------------------------------------------------------
 
     async def _process_token(
-        self, token_id: str, question: str, elapsed_t: float
+        self, token_id: str, question: str, elapsed_t: float, end_date: Optional[str] = None
     ) -> Optional[PipelineSignal]:
         """Run full pipeline for one token. Returns None on data failure."""
         # 1. Fetch live orderbook
@@ -240,6 +241,7 @@ class HeisenbergBot:
             reservation_price=quotes.reservation_price,
             bid_quote=quotes.bid_quote,
             ask_quote=quotes.ask_quote,
+            end_date=end_date,
         )
 
     # ------------------------------------------------------------------
@@ -277,7 +279,7 @@ class HeisenbergBot:
             for token in market.tokens:
                 token_id = token.get("token_id", "") if isinstance(token, dict) else str(token)
                 if token_id:
-                    tasks.append(self._process_token(token_id, market.question, elapsed_t))
+                    tasks.append(self._process_token(token_id, market.question, elapsed_t, market.end_date))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 

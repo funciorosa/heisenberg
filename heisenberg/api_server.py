@@ -182,6 +182,37 @@ def _format_time() -> str:
     return now.strftime("%H:%M:%S")
 
 
+def _short_label(question: str) -> str:
+    """Compress 'Bitcoin Up or Down - March 16, 7:30PM-7:45PM ET' → 'BTC 7:30-7:45PM'."""
+    import re as _re
+    q = question
+    for full, abbr in [("Bitcoin", "BTC"), ("Ethereum", "ETH"), ("Solana", "SOL"),
+                        ("Dogecoin", "DOGE"), ("HYPE", "HYPE"), ("BNB", "BNB"), ("XRP", "XRP")]:
+        q = q.replace(full, abbr)
+    # Extract time window e.g. "7:30PM-7:45PM"
+    m = _re.search(r"(\d+:\d+[AP]M-\d+:\d+[AP]M)", q, _re.IGNORECASE)
+    window = m.group(1) if m else ""
+    # Get asset abbreviation (first word)
+    asset = q.split()[0] if q else "?"
+    return f"{asset} {window}" if window else q[:20]
+
+
+def _mins_left(end_date: str | None) -> str:
+    """Return '4min' or '' if end_date unavailable."""
+    if not end_date:
+        return ""
+    try:
+        from datetime import timezone as _tz
+        s = end_date.rstrip("Z").split("+")[0]
+        end_dt = datetime.fromisoformat(s).replace(tzinfo=_tz.utc)
+        secs = (end_dt - datetime.now(_tz.utc)).total_seconds()
+        if secs <= 0:
+            return "0min"
+        return f"{int(secs/60)}min"
+    except Exception:
+        return ""
+
+
 def _signal_to_stream(signal: PipelineSignal, tag: str, cl: str, msg: str) -> dict:
     return {"time": _format_time(), "tag": tag, "cl": cl, "msg": msg}
 
@@ -240,12 +271,14 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     # Build stream entries
     new_entries: list[dict] = []
     for s in signals[:8]:  # cap to avoid flood
-        q_short = s.market_question[:30].strip()
+        label = _short_label(s.market_question)
+        left = _mins_left(s.end_date)
+        time_str = f" | {left} left" if left else ""
         if s.edge_signal.is_tradeable:
-            msg = f"{q_short} | z={s.edge_signal.z_score:+.3f} ev={s.edge_signal.expected_value:+.4f} size=${s.kelly_position_size:.2f}"
+            msg = f"{label}{time_str} | z={s.edge_signal.z_score:+.3f} size=${s.kelly_position_size:.2f}"
             new_entries.append({"time": _format_time(), "tag": "SIGNAL", "cl": "s-tag-g", "msg": msg})
         else:
-            msg = f"{q_short} | z={s.edge_signal.z_score:+.3f} mid={s.mid_price:.3f} net={s.edge_signal.net_edge:+.4f}"
+            msg = f"{label}{time_str} | z={s.edge_signal.z_score:+.3f} net={s.edge_signal.net_edge:+.4f}"
             new_entries.append({"time": _format_time(), "tag": "SKIP", "cl": "s-tag-b", "msg": msg})
 
     # Append SCAN heartbeat
