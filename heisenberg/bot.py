@@ -218,14 +218,20 @@ class HeisenbergBot:
         )
 
         # 7. Kelly position sizing
+        odds_win = 1.0 / ask if ask > 0 else 1.0
         kelly_input = KellyInput(
             prob_win=posterior,
-            odds_win=1.0 / ask if ask > 0 else 1.0,
+            odds_win=odds_win,
             odds_lose=1.0 / (1.0 - bid) if bid < 1.0 else 1.0,
             bankroll=self.bankroll,
             kelly_fraction=KELLY_FRACTION,
         )
         kelly_result = self.kelly.compute_kelly(kelly_input)
+        logger.debug(
+            "KELLY DEBUG: prob=%.3f odds_win=%.3f b=%.3f full_kelly=%.4f frac_kelly=%.4f size=$%.2f",
+            posterior, odds_win, odds_win - 1,
+            kelly_result.full_kelly, kelly_result.fractional_kelly, kelly_result.position_size,
+        )
 
         # 8. Stoikov reservation price + optimal quotes
         inventory = 0.0  # neutral inventory (no positions held yet)

@@ -103,18 +103,26 @@ def _simulate_trade(signal: PipelineSignal) -> None:
     global _peak_balance, _wins, _losses, _tradeable_count
 
     balance = bot_state["balance"]
-    # Position size = Kelly sizing, max 10% of live bankroll (compounding)
-    size = min(signal.kelly_position_size, balance * 0.10)
-    if size <= 0:
-        return
 
     ask = signal.spread_data.ask
     mid = signal.mid_price
     if ask <= 0 or ask >= 1 or mid <= 0 or mid >= 1:
         return
 
-    # Win probability = Bayesian posterior (no artificial cap)
-    posterior = min(0.95, max(0.05, mid + signal.edge_signal.net_edge * 8))
+    # Position size: use Kelly if valid, fallback to net_edge-scaled 2% of bankroll
+    size = signal.kelly_position_size
+    if size < 0.01:
+        posterior_strength = abs(signal.edge_signal.net_edge)
+        size = balance * 0.02 * max(1.0, posterior_strength * 10)
+    size = min(size, balance * 0.10)  # hard cap at 10% bankroll
+    size = max(size, 0.50)            # minimum $0.50 per trade
+    if size > balance:
+        return
+
+    # Win probability: use net_edge to shift from 50/50 baseline
+    # Gives realistic 50-72% win rate range for Up/Down markets
+    net_edge = signal.edge_signal.net_edge
+    posterior = min(0.72, max(0.28, 0.50 + net_edge * 2.5))
     fee = 0.007 * size  # 7bps taker fee
 
     if random.random() < posterior:
