@@ -412,9 +412,23 @@ function Screen1({ onNext }) {
 // ─────────────────────────────────────────────────────────────────────────────
 const REQS = [
   { text: "MetaMask wallet installed", link: "https://metamask.io", linkLabel: "metamask.io" },
-  { text: "MetaMask on Polygon network (chainId 137, RPC: polygon-rpc.com)", link: null },
+  {
+    text: "MetaMask connected to Polygon Mainnet (chainId 137)",
+    subs: [
+      "→ Both USDC and POL (MATIC) must be on Polygon network",
+      "→ Not Ethereum, not BSC, not Arbitrum — Polygon only",
+      "→ RPC: https://polygon-rpc.com",
+    ],
+  },
   { text: "USDC in wallet — minimum $50 recommended (NOT ETH)", link: null },
-  { text: "MATIC for gas fees (~$1 covers hundreds of transactions, ~$0.001/trade)", link: null },
+  {
+    text: "A small amount of POL (MATIC) for gas fees",
+    subs: [
+      "→ ~$1 worth covers hundreds of transactions",
+      "→ ~$0.001 per trade",
+      "→ Must be on Polygon network, not Ethereum",
+    ],
+  },
   { text: "Polymarket API key", link: "https://polymarket.com", linkLabel: "polymarket.com → Settings → API Keys → Create Key" },
 ];
 
@@ -452,6 +466,11 @@ function Screen2({ onNext, onBack }) {
                 <> → <a className="ws-check-link" href={r.link} target="_blank" rel="noreferrer">
                   {r.linkLabel}
                 </a></>
+              )}
+              {r.subs && (
+                <div style={{ paddingLeft: 14, marginTop: 4, fontSize: 11, color: "#008f11", lineHeight: 1.9 }}>
+                  {r.subs.map((s, j) => <div key={j}>{s}</div>)}
+                </div>
               )}
             </span>
           </div>
@@ -701,8 +720,9 @@ async function getMATICBalance(provider, address) {
 
 function Screen4({ onNext, onBack }) {
   const [address, setAddress] = useState(null);
+  const [chainId, setChainId] = useState(null);
   const [usdcBal, setUsdcBal] = useState(null);
-  const [maticBal, setMaticBal] = useState(null);
+  const [polBal, setPolBal] = useState(null);
   const [mmError, setMmError] = useState(null);
   const [capital, setCapital] = useState(100);
   const [apiKey, setApiKey] = useState("");
@@ -710,6 +730,55 @@ function Screen4({ onNext, onBack }) {
   const [showApi, setShowApi] = useState(false);
   const [mode, setMode] = useState("paper");
   const [showLiveWarn, setShowLiveWarn] = useState(false);
+  const [switching, setSwitching] = useState(false);
+
+  const isPolygon = chainId === POLYGON_CHAIN_ID || chainId === "0x89" || chainId === 137 || chainId === "137";
+
+  const fetchBalances = async (addr) => {
+    const [usdc, pol] = await Promise.all([
+      getUSDCBalance(window.ethereum, addr),
+      getMATICBalance(window.ethereum, addr),
+    ]);
+    setUsdcBal(usdc);
+    setPolBal(pol);
+    if (usdc !== null && usdc > 0) setCapital(Math.min(100, Math.floor(usdc)));
+  };
+
+  const switchToPolygon = async () => {
+    setSwitching(true);
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: POLYGON_CHAIN_ID }],
+      });
+      const newChain = await window.ethereum.request({ method: "eth_chainId" });
+      setChainId(newChain);
+      if (address) await fetchBalances(address);
+    } catch (swErr) {
+      if (swErr.code === 4902) {
+        try {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: POLYGON_CHAIN_ID,
+              chainName: "Polygon Mainnet",
+              nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+              rpcUrls: ["https://polygon-rpc.com"],
+              blockExplorerUrls: ["https://polygonscan.com"],
+            }],
+          });
+          const newChain = await window.ethereum.request({ method: "eth_chainId" });
+          setChainId(newChain);
+          if (address) await fetchBalances(address);
+        } catch (addErr) {
+          setMmError(addErr.message || "Failed to add Polygon network.");
+        }
+      } else {
+        setMmError(swErr.message || "Network switch failed.");
+      }
+    }
+    setSwitching(false);
+  };
 
   const connectMM = async () => {
     if (!window.ethereum) {
@@ -719,36 +788,13 @@ function Screen4({ onNext, onBack }) {
     try {
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
       const addr = accounts[0];
-
-      // Switch to Polygon if needed
-      try {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: POLYGON_CHAIN_ID }],
-        });
-      } catch (swErr) {
-        if (swErr.code === 4902) {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: POLYGON_CHAIN_ID,
-              chainName: "Polygon Mainnet",
-              nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 },
-              rpcUrls: ["https://polygon-rpc.com"],
-              blockExplorerUrls: ["https://polygonscan.com"],
-            }],
-          });
-        }
-      }
-
+      const cid = await window.ethereum.request({ method: "eth_chainId" });
       setAddress(addr);
-      const [usdc, matic] = await Promise.all([
-        getUSDCBalance(window.ethereum, addr),
-        getMATICBalance(window.ethereum, addr),
-      ]);
-      setUsdcBal(usdc);
-      setMaticBal(matic);
-      if (usdc !== null && usdc > 0) setCapital(Math.min(100, Math.floor(usdc)));
+      setChainId(cid);
+      const onPoly = cid === POLYGON_CHAIN_ID;
+      if (onPoly) {
+        await fetchBalances(addr);
+      }
     } catch (e) {
       setMmError(e.message || "Connection failed.");
     }
@@ -757,7 +803,7 @@ function Screen4({ onNext, onBack }) {
   const truncate = addr => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : "";
   const maxPos = (capital * 0.02).toFixed(2);
 
-  const canLaunch = address && capital >= 10 && (mode === "paper" || (apiKey && apiSecret));
+  const canLaunch = address && isPolygon && capital >= 10 && (mode === "paper" || (apiKey && apiSecret));
 
   const launch = () => {
     if (!canLaunch) return;
@@ -792,33 +838,68 @@ function Screen4({ onNext, onBack }) {
         ) : (
           <>
             <div className="ws-address-row">✓ {truncate(address)}</div>
-            <div className="ws-balance-row">
-              USDC: {usdcBal !== null ? `$${usdcBal.toFixed(2)}` : "—"}
-              &nbsp;&nbsp;|&nbsp;&nbsp;
-              MATIC: {maticBal !== null ? maticBal.toFixed(4) : "—"}
-            </div>
+            {!isPolygon ? (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ color: "#ffe600", fontSize: 11, marginBottom: 8 }}>
+                  ⚠ Please switch MetaMask to Polygon Mainnet
+                </div>
+                <button className="ws-btn" onClick={switchToPolygon} disabled={switching}>
+                  {switching ? "SWITCHING..." : "SWITCH TO POLYGON"}
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="ws-balance-row" style={{ marginTop: 6 }}>
+                  USDC: {usdcBal !== null ? `$${usdcBal.toFixed(2)}` : "—"}
+                  &nbsp;&nbsp;|&nbsp;&nbsp;
+                  POL (MATIC): {polBal !== null ? polBal.toFixed(4) : "—"}
+                </div>
+                <div style={{ fontSize: 10, color: "#004d00", marginTop: 6 }}>
+                  Make sure both tokens are on Polygon Mainnet.
+                  Tokens on other networks won't be detected.
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
 
       {/* Step 2 — Capital */}
-      {address && (
+      {address && isPolygon && (
         <div className="ws-connect-section ws-fadein">
           <div className="ws-connect-label">Step 2 — Starting Capital (USDC)</div>
           <input
             className="ws-input"
             type="number"
             min={10}
-            max={usdcBal || 10000}
+            max={usdcBal !== null && usdcBal > 0 ? usdcBal : undefined}
             value={capital}
             onChange={e => setCapital(Number(e.target.value))}
           />
+          {usdcBal !== null && usdcBal > 0 && (
+            <div className="ws-max-pos">WALLET MAX: ${usdcBal.toFixed(2)} USDC</div>
+          )}
           <div className="ws-max-pos">MAX POSITION PER TRADE: ${maxPos} (2% of capital)</div>
+          {usdcBal !== null && usdcBal === 0 && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ color: "#ffe600", fontSize: 11 }}>
+                ⚠ No USDC detected on Polygon. Deposit USDC to your wallet before launching.
+              </div>
+              <a
+                href="https://polygon.technology/usdc"
+                target="_blank"
+                rel="noreferrer"
+                style={{ fontSize: 10, color: "#008f11", textDecoration: "underline" }}
+              >
+                How to get USDC on Polygon →
+              </a>
+            </div>
+          )}
         </div>
       )}
 
       {/* Step 3 — API Keys */}
-      {address && (
+      {address && isPolygon && (
         <div className="ws-connect-section ws-fadein">
           <div className="ws-connect-label">
             Step 3 — API Keys&nbsp;
@@ -855,7 +936,7 @@ function Screen4({ onNext, onBack }) {
       )}
 
       {/* Step 4 — Mode */}
-      {address && (
+      {address && isPolygon && (
         <div className="ws-connect-section ws-fadein">
           <div className="ws-connect-label">Step 4 — Trading Mode</div>
           <div className="ws-mode-row">
@@ -896,7 +977,7 @@ function Screen4({ onNext, onBack }) {
 
       <div className="ws-btn-row">
         <button className="ws-btn-back" onClick={onBack}>← BACK</button>
-        {address && (
+        {address && isPolygon && (
           <button className="ws-btn ws-fadein" onClick={launch} disabled={!canLaunch}>
             LAUNCH HEISENBERG
           </button>
