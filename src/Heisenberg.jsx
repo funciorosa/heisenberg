@@ -385,6 +385,7 @@ function PLCurve({ hist }) {
 }
 
 const API_URL = (import.meta.env.VITE_BOT_API_URL || "http://localhost:8000").replace(/\/$/, "");
+const WS_URL = API_URL.replace(/^https/, "wss").replace(/^http/, "ws");
 
 export default function Heisenberg({ address, startingCapital = 100, mode = "paper" }) {
   const DEP = startingCapital;
@@ -427,7 +428,7 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
 
   // ── WebSocket connection ──────────────────────────────────────────
   const connectWs = useCallback(() => {
-    const wsUrl = API_URL.replace(/^http/, "ws") + "/stream";
+    const wsUrl = WS_URL + "/stream";
     try {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;

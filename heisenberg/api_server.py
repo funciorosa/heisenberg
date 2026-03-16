@@ -84,6 +84,8 @@ _losses: int = 0
 _cycle_start: float = time.time()
 _tradeable_count: int = 0  # across all cycles for trades/hr estimate
 _edges: list[float] = []
+_cycle_count: int = 0
+_markets_last_cycle: int = 0
 
 # Connected WebSocket clients
 _ws_clients: set[WebSocket] = set()
@@ -161,7 +163,9 @@ def _signal_to_stream(signal: PipelineSignal, tag: str, cl: str, msg: str) -> di
 # ---------------------------------------------------------------------------
 
 def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
-    global _tradeable_count
+    global _tradeable_count, _cycle_count, _markets_last_cycle
+    _cycle_count += 1
+    _markets_last_cycle = len(signals)
 
     tradeable = [s for s in signals if s.edge_signal.is_tradeable]
     total_now = bot_state["total_trades"] + len(signals)
@@ -257,6 +261,17 @@ async def _startup() -> None:
 # ---------------------------------------------------------------------------
 # HTTP endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "cycles": _cycle_count,
+        "markets": _markets_last_cycle,
+        "balance": bot_state["balance"],
+        "uptime_s": round(time.time() - _cycle_start),
+    }
+
 
 @app.get("/status")
 async def get_status():
