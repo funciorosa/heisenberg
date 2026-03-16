@@ -529,63 +529,100 @@ class PolymarketCLOBClient:
         return all_btc[:5]
 
     async def fetch_short_horizon_markets(self) -> list[MarketInfo]:
-        """Fetch ALL short-term crypto markets resolving within 72 hours.
+        """Fetch active crypto 'Up or Down' markets (BTC/ETH/SOL/XRP/etc.).
+
+        These are the hourly and sub-hourly directional markets on Polymarket:
+          - "Bitcoin Up or Down - March 16, 4PM ET"  ($800K+ liquidity)
+          - "Ethereum Up or Down - March 16, 5PM ET" ($600K+ liquidity)
+          - 5-minute and 15-minute windows (~$30K each)
 
         Strategy:
-          1. Pull all crypto events from Gamma API, collect every market with tokens.
-          2. Sort by volume DESC, take top 50.
-          3. Include if: end_date missing/unparseable OR end_date < now+72h.
-             Skip only if end_date is parseable AND > 72h away or already resolved.
-          4. If fewer than 5 pass the filter, fall back to top 20 by volume.
+          1. Pull all crypto events sorted by liquidity DESC.
+          2. Keep events whose title contains "up or down" (case-insensitive).
+          3. For each, extract the single market + clobTokenIds.
+          4. Filter: must not be closed, must have tokens, endDate > now.
+          5. Sort by liquidity DESC (most liquid first).
+          6. If no "up or down" markets found, fall back to ALL crypto events
+             resolving within 72h.
 
         Returns
         -------
-        list of MarketInfo sorted by volume descending.
+        list of MarketInfo sorted by liquidity descending.
         """
-        from datetime import datetime, timezone, timedelta
         import json as _json
+        from datetime import datetime, timezone, timedelta
 
         now = datetime.now(timezone.utc)
-        cutoff = now + timedelta(hours=72)
 
-        all_markets: list[MarketInfo] = []
+        def _parse_end(raw_end: str | None) -> datetime | None:
+            if not raw_end:
+                return None
+            try:
+                s = raw_end.rstrip("Z").split("+")[0]
+                return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+            except (ValueError, AttributeError):
+                return None
+
+        def _extract_tokens(mkt: dict) -> list[dict]:
+            raw = mkt.get("clobTokenIds") or mkt.get("tokens") or []
+            if isinstance(raw, str):
+                try:
+                    raw = _json.loads(raw)
+                except Exception:
+                    raw = []
+            return [{"token_id": tid} for tid in raw if isinstance(tid, str)]
+
+        results: list[MarketInfo] = []
         seen: set[str] = set()
 
         try:
             data = await self._gamma_get(
                 "/events",
-                params={"closed": "false", "limit": 200, "tag_slug": "crypto"},
+                params={
+                    "closed": "false",
+                    "limit": 200,
+                    "tag_slug": "crypto",
+                    "order": "liquidity",
+                    "ascending": "false",
+                },
             )
             events = data if isinstance(data, list) else data.get("data", [])
 
             for event in events:
+                title = (event.get("title") or event.get("name") or "").lower()
+                if "up or down" not in title:
+                    continue
+
                 for mkt in event.get("markets", []):
                     if mkt.get("closed", False):
                         continue
+                    if not mkt.get("acceptingOrders", False):
+                        continue
+
                     cid = mkt.get("conditionId") or mkt.get("condition_id") or ""
                     if not cid or cid in seen:
                         continue
 
-                    raw_token_ids = mkt.get("clobTokenIds") or mkt.get("tokens") or []
-                    if isinstance(raw_token_ids, str):
-                        try:
-                            raw_token_ids = _json.loads(raw_token_ids)
-                        except Exception:
-                            raw_token_ids = []
-                    tokens = [{"token_id": tid} for tid in raw_token_ids if isinstance(tid, str)]
+                    tokens = _extract_tokens(mkt)
                     if not tokens:
-                        continue  # skip markets with no tradeable tokens
+                        continue
+
+                    raw_end = mkt.get("endDate") or mkt.get("endDateIso") or None
+                    end_dt = _parse_end(raw_end)
+                    if end_dt and end_dt <= now:
+                        continue  # already resolved
 
                     seen.add(cid)
-                    question = mkt.get("question") or mkt.get("title") or ""
-                    volume = float(mkt.get("volumeNum") or mkt.get("volume") or 0)
-                    raw_end = mkt.get("endDateIso") or mkt.get("endDate") or None
+                    question = mkt.get("question") or event.get("title") or ""
+                    liq = float(mkt.get("liquidityNum") or mkt.get("liquidity") or
+                                event.get("liquidity") or 0)
+                    vol = float(mkt.get("volumeNum") or mkt.get("volume") or 0)
 
-                    all_markets.append(MarketInfo(
+                    results.append(MarketInfo(
                         condition_id=cid,
                         question=question,
                         end_date=raw_end,
-                        volume=volume,
+                        volume=liq,  # sort by liquidity — best proxy for tradability
                         active=True,
                         tokens=tokens,
                         raw=mkt,
@@ -595,41 +632,24 @@ class PolymarketCLOBClient:
             logger.warning("fetch_short_horizon_markets Gamma API failed (%s)", exc)
             return []
 
-        # Sort by volume descending, cap at top 50
-        all_markets.sort(key=lambda m: m.volume, reverse=True)
-        top50 = all_markets[:50]
+        # Sort by liquidity (stored in volume field) descending
+        results.sort(key=lambda m: m.volume, reverse=True)
 
-        # Apply 72h filter: include if no end_date, or end_date < cutoff
-        results: list[MarketInfo] = []
-        for m in top50:
-            if not m.end_date:
-                results.append(m)  # no date → assume short-term, include
-                continue
-            try:
-                raw = m.end_date.rstrip("Z").split("+")[0]
-                end_dt = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
-                if end_dt <= now:
-                    continue  # already resolved
-                if end_dt > cutoff:
-                    continue  # resolves too far out
-                results.append(m)
-            except (ValueError, AttributeError):
-                results.append(m)  # unparseable date → include
-
-        # Fallback: if fewer than 5 passed, use top 20 regardless of date
-        if len(results) < 5:
+        if not results:
             logger.warning(
-                "fetch_short_horizon_markets: only %d markets passed 72h filter "
-                "— falling back to top 20 by volume", len(results),
+                "fetch_short_horizon_markets: no 'Up or Down' markets found — "
+                "check Polymarket for active directional markets"
             )
-            results = top50[:20]
+            return []
 
-        logger.info("fetch_short_horizon_markets: scanning %d markets", len(results))
+        logger.info(
+            "fetch_short_horizon_markets: %d active Up/Down markets", len(results)
+        )
         for i, m in enumerate(results[:10], 1):
             logger.info(
-                "  #%2d vol=%8.0f  tokens=%d  end=%-20s  %s",
+                "  #%2d liq=%9.0f  tokens=%d  end=%-19s  %s",
                 i, m.volume, len(m.tokens),
-                (m.end_date or "None")[:19], m.question[:60],
+                (m.end_date or "None")[:19], m.question[:65],
             )
 
         return results

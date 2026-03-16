@@ -343,6 +343,38 @@ async def get_markets():
     }
 
 
+@app.get("/search-test")
+async def search_test():
+    """Debug endpoint: runs the Up/Down market search and returns raw results."""
+    import httpx as _httpx
+    GAMMA = "https://gamma-api.polymarket.com"
+    async with _httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(f"{GAMMA}/events", params={
+            "closed": "false", "limit": 200, "tag_slug": "crypto",
+            "order": "liquidity", "ascending": "false",
+        })
+        events = r.json() if isinstance(r.json(), list) else r.json().get("data", [])
+    updown = [
+        {
+            "title": e.get("title"),
+            "liquidity": e.get("liquidity"),
+            "endDate": e.get("endDate"),
+            "market_count": len(e.get("markets", [])),
+            "accepting": any(m.get("acceptingOrders") for m in e.get("markets", [])),
+            "tokens": sum(
+                len(m.get("clobTokenIds") or []) for m in e.get("markets", [])
+            ),
+        }
+        for e in events
+        if "up or down" in (e.get("title") or "").lower()
+    ]
+    return {
+        "total_crypto_events": len(events),
+        "up_down_markets": len(updown),
+        "markets": updown,
+    }
+
+
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
