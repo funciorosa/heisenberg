@@ -690,19 +690,29 @@ function ScreenRabbit({ onNext }) {
 const POLYGON_CHAIN_ID = "0x89"; // 137
 
 async function getUSDCBalance(provider, address) {
-  // USDC on Polygon: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
-  const USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+  // Polygon has two USDC contracts:
+  // - Native USDC (Circle, 2023+): 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359
+  // - Bridged USDC.e (legacy PoS):  0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
+  const CONTRACTS = [
+    "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", // native USDC
+    "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174", // USDC.e (bridged)
+  ];
   const data = "0x70a08231" + address.slice(2).padStart(64, "0");
-  try {
-    const result = await provider.request({
-      method: "eth_call",
-      params: [{ to: USDC, data }, "latest"],
-    });
-    const raw = parseInt(result, 16);
-    return raw / 1e6; // USDC has 6 decimals
-  } catch {
-    return null;
+  let total = 0;
+  for (const contract of CONTRACTS) {
+    try {
+      const result = await provider.request({
+        method: "eth_call",
+        params: [{ to: contract, data }, "latest"],
+      });
+      if (result && result !== "0x") {
+        total += parseInt(result, 16) / 1e6;
+      }
+    } catch {
+      // ignore individual contract failures
+    }
   }
+  return total;
 }
 
 async function getMATICBalance(provider, address) {
