@@ -67,6 +67,7 @@ bot_state: dict[str, Any] = {
     "edge": 0.0,
     "signals": [],
     "stream": [],
+    "expected_edge": 0.0,
     "status": {
         "polymarket": "ONLINE",
         "bayes": "ONLINE",
@@ -95,7 +96,7 @@ _ws_clients: set[WebSocket] = set()
 # ---------------------------------------------------------------------------
 
 def _simulate_trade(signal: PipelineSignal) -> None:
-    """Simulate a paper trade outcome and update bot_state."""
+    """Simulate a conservative realistic paper trade outcome."""
     global _peak_balance, _wins, _losses, _tradeable_count
 
     balance = bot_state["balance"]
@@ -103,22 +104,21 @@ def _simulate_trade(signal: PipelineSignal) -> None:
     if size <= 0:
         return
 
-    ask = signal.spread_data.ask   # market ask price we'd pay
     mid = signal.mid_price
-    if ask <= 0 or ask >= 1 or mid <= 0 or mid >= 1:
+    if mid <= 0 or mid >= 1:
         return
 
-    # Win probability = market mid + our edge (bounded to reasonable range)
-    net_edge = signal.edge_signal.net_edge
-    win_prob = max(0.35, min(0.80, mid + net_edge * 5))
+    # Conservative win probability — 52–60% regardless of model confidence
+    # Prevents the model from congratulating itself too aggressively
+    posterior = max(0.52, min(0.60, mid + signal.edge_signal.net_edge * 3))
 
-    if random.random() < win_prob:
-        # YES resolves to 1.0: profit = size * (1/ask - 1)
-        pnl = size * (1.0 / ask - 1.0)
+    if random.random() < posterior:
+        # Win: 8% gain on position (conservative, after fees + slippage)
+        pnl = size * 0.08
         _wins += 1
     else:
-        # NO resolves: lose the stake
-        pnl = -size
+        # Lose: 10% loss on position (includes fees + adverse fill)
+        pnl = -size * 0.10
         _losses += 1
 
     bot_state["balance"] = round(balance + pnl, 2)
@@ -143,7 +143,10 @@ def _simulate_trade(signal: PipelineSignal) -> None:
     # Win rate
     total = _wins + _losses
     if total > 0:
-        bot_state["win_rate"] = round(_wins / total * 100, 1)
+        wr = _wins / total
+        bot_state["win_rate"] = round(wr * 100, 1)
+        # Expected edge per trade: win%*8% gain - loss%*10% loss
+        bot_state["expected_edge"] = round(wr * 0.08 - (1 - wr) * 0.10, 4)
 
     # ROI
     dep = bot_state["deposit"]
@@ -191,9 +194,9 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     if _edges:
         bot_state["edge"] = round(sum(_edges) / len(_edges) * 100, 2)
 
-    # Trades/hr estimate
+    # Trades/hr estimate (no cap — reflects actual signal rate)
     elapsed_hrs = max((time.time() - _cycle_start) / 3600, 1 / 3600)
-    bot_state["trades_hr"] = min(int(_tradeable_count / elapsed_hrs), 999)
+    bot_state["trades_hr"] = int(_tradeable_count / elapsed_hrs)
 
     # Paper-trade each tradeable signal
     for s in tradeable:

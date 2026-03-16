@@ -417,8 +417,9 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
   const [winRate, setWinRate]   = useState(0.0);
   const [tradesHr, setTradesHr] = useState(0);
   const [total, setTotal]       = useState(0);
-  const [sharpe, setSharpe]     = useState(0.0);
-  const [maxDD, setMaxDD]       = useState(0.0);
+  const [sharpe, setSharpe]         = useState(0.0);
+  const [maxDD, setMaxDD]           = useState(0.0);
+  const [expectedEdge, setExpectedEdge] = useState(0.0);
   const [wsStatus, setWsStatus] = useState("connecting"); // "live" | "reconnecting" | "connecting"
 
   const streamRef   = useRef(null);
@@ -451,8 +452,9 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
         if (data.win_rate != null)    setWinRate(data.win_rate);
         if (data.trades_hr != null)   setTradesHr(data.trades_hr);
         if (data.total_trades != null) setTotal(data.total_trades);
-        if (data.sharpe != null)      setSharpe(data.sharpe);
-        if (data.max_dd != null)      setMaxDD(data.max_dd);
+        if (data.sharpe != null)        setSharpe(data.sharpe);
+        if (data.max_dd != null)        setMaxDD(data.max_dd);
+        if (data.expected_edge != null) setExpectedEdge(data.expected_edge);
         if (data.stream?.length)      setStream(data.stream.slice(-90));
         if (data.balance != null && Math.random() < 0.2) {
           const delta = (data.balance - bal).toFixed(2);
@@ -645,6 +647,7 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
               ["Strategy", "5m BTC Arb", false],
               ["Orders", "Limit Only", false],
               ["Hedge", "Directional", false],
+              ["Exp. Edge", `${(expectedEdge * 100).toFixed(2)}%/trade`, expectedEdge > 0],
             ].map(([l, v, b]) => (
               <div className="mrow" key={l}>
                 <span className="ml">{l}</span>
@@ -652,6 +655,18 @@ export default function Heisenberg({ address, startingCapital = 100, mode = "pap
               </div>
             ))}
           </div>
+          {mode === "paper" && (
+            <div style={{
+              margin: "8px 0 4px",
+              fontSize: 9,
+              color: "var(--yellow)",
+              letterSpacing: "0.08em",
+              borderTop: "1px solid var(--green5)",
+              paddingTop: 6,
+            }}>
+              ⚠ PAPER SIMULATION — not real money
+            </div>
+          )}
           <div className="status-block">
             <div className="st-title">Status</div>
             <div className="st-grid">

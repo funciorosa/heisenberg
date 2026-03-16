@@ -453,31 +453,80 @@ class PolymarketCLOBClient:
         return results
 
     async def fetch_btc_5min_markets(self) -> list[MarketInfo]:
-        """Return BTC markets best suited for short-horizon scanning.
+        """Return BTC markets resolving within the next 24 hours.
 
-        Polymarket does not currently offer sub-hour BTC resolution markets.
-        This method returns all active BTC price prediction markets so the
-        HEISENBERG pipeline still has data to process.  If explicit 5-min
-        markets appear in future, the keyword filter will pick them up first.
+        Long-term markets (Bitcoin reserve bill, $150k by December, etc.) are
+        filtered out — they have no short-term arbitrage opportunity.
+        Only markets with a parseable end_date < now+24h are included.
 
         Returns
         -------
-        list of MarketInfo for BTC markets.
+        list of MarketInfo for short-horizon BTC markets.
         """
+        from datetime import datetime, timezone, timedelta
+
         all_btc = await self.fetch_btc_markets()
+        now = datetime.now(timezone.utc)
+        cutoff = now + timedelta(hours=24)
 
-        # Prefer explicit short-interval markets if they exist
-        short_kws = ("5-minute", "5 minute", "5min", "hourly", "1-hour", "1 hour")
-        short = [m for m in all_btc if any(kw in m.question.lower() for kw in short_kws)]
-        if short:
-            logger.info("fetch_btc_5min_markets: %d short-interval markets", len(short))
-            return short
+        short_horizon: list[MarketInfo] = []
+        for m in all_btc:
+            if not m.end_date:
+                logger.debug("Skipping %r — no end_date", m.question[:50])
+                continue
+            try:
+                # Handle ISO strings with or without timezone suffix
+                raw = m.end_date.rstrip("Z")
+                if "+" in raw:
+                    raw = raw.split("+")[0]
+                end_dt = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+            except (ValueError, AttributeError):
+                logger.debug("Skipping %r — unparseable end_date %r", m.question[:50], m.end_date)
+                continue
 
-        logger.info(
-            "fetch_btc_5min_markets: no short-interval markets — scanning all %d BTC markets",
-            len(all_btc),
-        )
-        return all_btc
+            if end_dt > cutoff:
+                logger.debug(
+                    "Skipping %r — resolves too far out (%s)",
+                    m.question[:50], end_dt.strftime("%Y-%m-%d"),
+                )
+                continue
+
+            logger.info("SHORT-HORIZON market: %r ends %s", m.question[:60], end_dt.isoformat())
+            short_horizon.append(m)
+
+        if short_horizon:
+            logger.info(
+                "fetch_btc_5min_markets: %d/%d markets resolve within 24h",
+                len(short_horizon), len(all_btc),
+            )
+            return short_horizon
+
+        # Fallback: no markets resolve within 24h — return nearest-expiry markets
+        parseable = []
+        for m in all_btc:
+            if not m.end_date:
+                continue
+            try:
+                raw = m.end_date.rstrip("Z").split("+")[0]
+                end_dt = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+                if end_dt > now:
+                    parseable.append((end_dt, m))
+            except (ValueError, AttributeError):
+                continue
+
+        if parseable:
+            parseable.sort(key=lambda x: x[0])
+            nearest = [m for _, m in parseable[:5]]
+            logger.info(
+                "fetch_btc_5min_markets: no 24h markets — returning %d nearest-expiry",
+                len(nearest),
+            )
+            for _, m in parseable[:5]:
+                logger.info("  nearest: %r end=%s", m.question[:60], _.isoformat())
+            return nearest
+
+        logger.warning("fetch_btc_5min_markets: no markets with parseable end_date")
+        return all_btc[:5]
 
     async def fetch_mid_prices(self, token_ids: list[str]) -> dict[str, float]:
         """Fetch mid-point prices for a batch of tokens.
