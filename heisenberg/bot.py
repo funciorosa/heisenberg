@@ -1,0 +1,300 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║  ██╗  ██╗███████╗██╗███████╗███████╗███╗   ██╗██████╗ ███████╗██████╗  ██████╗  ║
+║  ██║  ██║██╔════╝██║██╔════╝██╔════╝████╗  ██║██╔══██╗██╔════╝██╔══██╗██╔════╝  ║
+║  ███████║█████╗  ██║███████╗█████╗  ██╔██╗ ██║██████╔╝█████╗  ██████╔╝██║  ███╗ ║
+║  ██╔══██║██╔══╝  ██║╚════██║██╔══╝  ██║╚██╗██║██╔══██╗██╔══╝  ██╔══██╗██║   ██║ ║
+║  ██║  ██║███████╗██║███████║███████╗██║ ╚████║██████╔╝███████╗██║  ██║╚██████╔╝ ║
+║  ╚═╝  ╚═╝╚══════╝╚═╝╚══════╝╚══════╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝  ║
+║                                                                              ║
+║  "The more precisely the position is determined, the less precisely the     ║
+║   momentum is known in this instant, and vice versa."  — W. Heisenberg      ║
+║                                                                              ║
+║  Polymarket 5-Minute BTC Arbitrage Bot                                      ║
+║  READ-ONLY MODE  |  NO LIVE TRADING  |  NO WALLET                           ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Optional
+
+from polymarket_client import PolymarketCLOBClient, OrderBook, MarketInfo
+from bayesian_model import BayesianModel, MarketFeatures, compute_ewma_vol
+from edge_filter import EdgeFilter, SpreadData, EdgeSignal
+from kelly_sizing import KellySizer, KellyInput
+from stoikov_quoting import StoikovQuoter, StoikovParams
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("HEISENBERG")
+
+# ---------------------------------------------------------------------------
+# Pipeline config
+# ---------------------------------------------------------------------------
+
+POLL_INTERVAL_SECONDS = 5        # How often to scan markets
+MAX_MARKETS_PER_CYCLE = 10       # Cap to avoid rate limits
+BANKROLL = 1_000.0               # Simulated capital (no real money)
+KELLY_FRACTION = 0.25            # Fractional Kelly multiplier
+MIN_EDGE_BPS = 50                # Minimum net edge to consider a signal
+MIN_Z_SCORE = 1.5                # Minimum z-score threshold
+MAX_SPREAD_BPS = 500             # Maximum acceptable spread
+
+
+@dataclass
+class PipelineSignal:
+    """Full signal record produced for one market token per cycle."""
+
+    token_id: str
+    market_question: str
+    mid_price: float
+    spread_data: SpreadData
+    edge_signal: EdgeSignal
+    kelly_position_size: float
+    reservation_price: float
+    bid_quote: float
+    ask_quote: float
+    timestamp: float = field(default_factory=time.time)
+
+    def summary(self) -> str:
+        direction = "BUY" if self.edge_signal.net_edge > 0 else "SELL"
+        return (
+            f"[{'SIGNAL' if self.edge_signal.is_tradeable else 'SKIP  '}] "
+            f"{self.market_question[:50]:<50} | "
+            f"mid={self.mid_price:.3f} | "
+            f"z={self.edge_signal.z_score:+.2f} | "
+            f"ev={self.edge_signal.expected_value:+.4f} | "
+            f"edge={self.edge_signal.net_edge:+.4f} | "
+            f"size=${self.kelly_position_size:.2f} | "
+            f"quotes=[{self.bid_quote:.3f}, {self.ask_quote:.3f}] | "
+            f"{direction}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+
+class HeisenbergBot:
+    """
+    Main orchestrator connecting all HEISENBERG modules in a single pipeline:
+
+        PolymarketClient
+            → BayesianModel  (posterior probability of mispricing)
+            → EdgeFilter     (z-score, EV, net edge signal)
+            → KellySizer     (fractional Kelly position sizing)
+            → StoikovQuoter  (reservation price + optimal quotes)
+            → PipelineSignal (output)
+    """
+
+    def __init__(self, bankroll: float = BANKROLL) -> None:
+        self.bankroll = bankroll
+        self.client = PolymarketCLOBClient()
+        self.bayesian = BayesianModel(prior=0.5)
+        self.edge_filter = EdgeFilter(
+            min_edge_bps=MIN_EDGE_BPS,
+            min_z_score=MIN_Z_SCORE,
+            max_spread_bps=MAX_SPREAD_BPS,
+        )
+        self.kelly = KellySizer(kelly_fraction=KELLY_FRACTION, max_position_pct=0.05)
+        self.stoikov = StoikovQuoter(StoikovParams(gamma=0.1, sigma=0.02, T=300.0))
+
+        # Rolling price history per token for z-score computation
+        self._price_history: dict[str, list[float]] = {}
+
+    # ------------------------------------------------------------------
+    # Per-token signal computation
+    # ------------------------------------------------------------------
+
+    async def _process_token(
+        self, token_id: str, question: str, elapsed_t: float
+    ) -> Optional[PipelineSignal]:
+        """Run full pipeline for one token. Returns None on data failure."""
+        # 1. Fetch live orderbook
+        try:
+            book: OrderBook = await self.client.fetch_orderbook(token_id)
+        except Exception as exc:
+            logger.warning("fetch_orderbook failed for %s: %s", token_id, exc)
+            return None
+
+        if book.best_bid is None or book.best_ask is None:
+            logger.debug("Empty book for token %s, skipping.", token_id)
+            return None
+
+        mid = book.mid_price
+        bid = book.best_bid
+        ask = book.best_ask
+
+        # 2. Update rolling price history
+        history = self._price_history.setdefault(token_id, [])
+        history.append(mid)
+        if len(history) > 200:
+            history.pop(0)
+
+        # 3. Compute market features for Bayesian model
+        bid_vol = sum(pl.size for pl in book.bids)
+        ask_vol = sum(pl.size for pl in book.asks)
+        total_vol = bid_vol + ask_vol
+        book_imbalance = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0.0
+
+        vol = compute_ewma_vol(history, span=20)
+        # spot_delta: deviation of mid from neutral 0.5 (fair coin prior)
+        spot_delta = (mid - 0.5) / max(vol, 1e-6) if vol > 0 else 0.0
+
+        features = MarketFeatures(
+            spot_delta=spot_delta,
+            volatility=vol,
+            book_imbalance=book_imbalance,
+            spread=ask - bid,
+            mid_price=mid,
+        )
+
+        # 4. Bayesian posterior
+        signal = self.bayesian.compute_signal(features)
+        posterior = signal.posterior_prob
+
+        # 5. Spread data
+        spread_data = self.edge_filter.compute_spread(bid, ask)
+
+        # 6. Z-score + EV + net edge
+        z_score = self.edge_filter.compute_z_score(mid, history[:-1], window=60)
+        ev = self.edge_filter.compute_ev(
+            prob=posterior,
+            odds_yes=1.0 / ask if ask > 0 else 0.0,
+            odds_no=1.0 / (1.0 - bid) if bid < 1.0 else 0.0,
+            fee_bps=20,
+        )
+        edge_signal = self.edge_filter.filter(spread_data, z_score, ev, posterior)
+
+        # 7. Kelly position sizing
+        kelly_input = KellyInput(
+            prob_win=posterior,
+            odds_win=1.0 / ask if ask > 0 else 1.0,
+            odds_lose=1.0 / (1.0 - bid) if bid < 1.0 else 1.0,
+            bankroll=self.bankroll,
+            kelly_fraction=KELLY_FRACTION,
+        )
+        kelly_result = self.kelly.compute_kelly(kelly_input)
+
+        # 8. Stoikov reservation price + optimal quotes
+        inventory = 0.0  # neutral inventory (no positions held yet)
+        quotes = self.stoikov.compute_quotes(mid, inventory, elapsed_t)
+
+        return PipelineSignal(
+            token_id=token_id,
+            market_question=question,
+            mid_price=mid,
+            spread_data=spread_data,
+            edge_signal=edge_signal,
+            kelly_position_size=kelly_result.position_size,
+            reservation_price=quotes.reservation_price,
+            bid_quote=quotes.bid_quote,
+            ask_quote=quotes.ask_quote,
+        )
+
+    # ------------------------------------------------------------------
+    # Market discovery
+    # ------------------------------------------------------------------
+
+    async def _fetch_active_btc_markets(self) -> list[MarketInfo]:
+        """Fetch BTC 5-min markets from Polymarket."""
+        try:
+            markets = await self.client.fetch_btc_5min_markets()
+            return markets[:MAX_MARKETS_PER_CYCLE]
+        except Exception as exc:
+            logger.warning("Market discovery failed: %s", exc)
+            return []
+
+    # ------------------------------------------------------------------
+    # Single scan cycle
+    # ------------------------------------------------------------------
+
+    async def run_cycle(self, cycle_num: int) -> list[PipelineSignal]:
+        """Execute one full scan cycle across all active BTC markets."""
+        logger.info("── Cycle %d ──────────────────────────────────", cycle_num)
+        markets = await self._fetch_active_btc_markets()
+
+        if not markets:
+            logger.warning("No BTC markets found this cycle.")
+            return []
+
+        elapsed_t = (cycle_num * POLL_INTERVAL_SECONDS) % 300  # within 5-min window
+
+        tasks = []
+        for market in markets:
+            for token in market.tokens:
+                token_id = token.get("token_id", "") if isinstance(token, dict) else str(token)
+                if token_id:
+                    tasks.append(self._process_token(token_id, market.question, elapsed_t))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        signals: list[PipelineSignal] = []
+        for r in results:
+            if isinstance(r, PipelineSignal):
+                signals.append(r)
+                logger.info(r.summary())
+            elif isinstance(r, Exception):
+                logger.debug("Token processing error: %s", r)
+
+        tradeable = [s for s in signals if s.edge_signal.is_tradeable]
+        logger.info(
+            "Cycle %d complete — %d tokens scanned, %d tradeable signals",
+            cycle_num, len(signals), len(tradeable),
+        )
+        return signals
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
+
+    async def run(self, max_cycles: int = 0) -> None:
+        """
+        Main event loop. Runs indefinitely (max_cycles=0) or for N cycles.
+        READ-ONLY: logs signals only, no orders placed.
+        """
+        logger.info("HEISENBERG bot starting — READ-ONLY MODE, no live trading.")
+        logger.info("Bankroll: $%.2f | Kelly: %.0f%% | Poll: %ds",
+                    self.bankroll, KELLY_FRACTION * 100, POLL_INTERVAL_SECONDS)
+
+        cycle = 0
+        try:
+            while True:
+                cycle += 1
+                await self.run_cycle(cycle)
+
+                if max_cycles and cycle >= max_cycles:
+                    logger.info("Reached max_cycles=%d, shutting down.", max_cycles)
+                    break
+
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            logger.info("Bot cancelled — shutting down cleanly.")
+        except KeyboardInterrupt:
+            logger.info("KeyboardInterrupt — shutting down.")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    bot = HeisenbergBot(bankroll=BANKROLL)
+    await bot.run()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
