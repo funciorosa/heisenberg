@@ -331,7 +331,12 @@ async def _place_live_order(signal: PipelineSignal) -> None:
     offset = -0.005 if direction == "BUY" else +0.005
     price = round(max(0.01, min(0.99, signal.mid_price + offset)), 3)
 
-    result = await _oe.place_order(signal.token_id, direction, price, 1.00)
+    # Convert Kelly dollar size → shares; enforce Polymarket 5-share minimum
+    dollar_size = max(signal.kelly_position_size, 0.0)
+    shares = dollar_size / price if price > 0 else 0.0
+    shares = max(5.0, round(shares, 2))
+
+    result = await _oe.place_order(signal.token_id, direction, price, shares)
 
     label = _short_label(signal.market_question)
     if result:
