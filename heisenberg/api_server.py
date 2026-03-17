@@ -332,52 +332,41 @@ async def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
 
 async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
-    """Cancel all open orders, then place signals — max 5 orders per minute."""
     global _orders_this_minute, _minute_reset
-
     now = time.time()
     if now - _minute_reset > 60:
         _orders_this_minute = 0
         _minute_reset = now
-    logger.info("Rate: %d orders this minute, reset in %.0fs",
-                _orders_this_minute, 60 - (time.time() - _minute_reset))
     if _orders_this_minute >= 20:
-        logger.info("Rate limit: 20 orders/min reached — skipping cycle")
+        logger.info("Rate limit reached — skipping")
         return
-
     MAX_CONCURRENT = 3
     if bot_state.get("positions_open", 0) >= MAX_CONCURRENT:
-        logger.info("Max concurrent positions (%d) reached — skipping cycle", MAX_CONCURRENT)
+        logger.info("Max concurrent positions reached — skipping")
         return
-
     for s in signals:
         await _place_live_order(s)
 
 
 async def _place_live_order(signal: PipelineSignal) -> None:
-    """Place a real Polymarket order for a tradeable signal."""
+    global _orders_this_minute
     market_key = signal.market_question[:60]
     now = time.time()
     if market_key in _active_market_orders:
-        if now - _active_market_orders[market_key] < 300:
-            logger.info("Already traded %s this window — skipping", market_key[:40])
+        elapsed = now - _active_market_orders[market_key]
+        if elapsed < 300:
+            logger.info("Market %s blocked for %.0fs more",
+                market_key[:30], 300 - elapsed)
             return
-    _active_market_orders[market_key] = now
-
     direction = "BUY" if signal.edge_signal.net_edge > 0 else "SELL"
-    logger.info("PLACING ORDER: %s %s", signal.token_id[:12], direction)
     offset = -0.005 if direction == "BUY" else +0.005
     price = round(max(0.01, min(0.99, signal.mid_price + offset)), 3)
-
-    # Convert Kelly dollar size → shares; enforce Polymarket 5-share minimum
     dollar_size = max(signal.kelly_position_size, 0.0)
     shares = dollar_size / price if price > 0 else 0.0
     shares = max(1.0, round(shares, 2))
-
-    global _orders_this_minute
     _orders_this_minute += 1
+    _active_market_orders[market_key] = now
     result = await _oe.place_order(signal.token_id, direction, price, shares)
-
     label = _short_label(signal.market_question)
     if result:
         bot_state["total_trades"] += 1
@@ -386,14 +375,18 @@ async def _place_live_order(signal: PipelineSignal) -> None:
             "time": _format_time(),
             "tag": "ORDER",
             "cl": "s-tag-g",
-            "msg": f"{label} | {direction} $1.00 @ {price:.3f}",
+            "msg": f"{label} | {direction} ${dollar_size:.2f} @ {price:.3f}",
         })
+        logger.info("ORDER PLACED: %s %s $%.2f @ %.3f",
+            direction, label, dollar_size, price)
     else:
+        _active_market_orders.pop(market_key, None)
+        _orders_this_minute = max(0, _orders_this_minute - 1)
         bot_state["stream"].append({
             "time": _format_time(),
             "tag": "ERR",
             "cl": "s-tag-r",
-            "msg": f"Order failed — check logs",
+            "msg": f"Order failed — {label}",
         })
 
 
