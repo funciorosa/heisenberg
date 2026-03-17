@@ -19,13 +19,11 @@ async def _get_client():
             return None
         try:
             from py_clob_client.client import ClobClient
-            from eth_account import Account
             c = await asyncio.to_thread(
                 ClobClient, CLOB_HOST,
                 key=PRIVATE_KEY,
                 chain_id=CHAIN_ID,
-                signature_type=2,
-                funder=Account.from_key(PRIVATE_KEY).address,
+                signature_type=0,
             )
             # Get API credentials
             try:
@@ -75,17 +73,10 @@ async def _run_startup_allowance():
     client = await _get_client()
     if client:
         try:
-            logger.info("Running update_balance_allowance...")
-            result = await asyncio.to_thread(client.update_balance_allowance)
-            logger.info("update_balance_allowance OK: %s", result)
+            await asyncio.to_thread(client.update_balance_allowance)
+            logger.info("update_balance_allowance OK")
         except Exception as e:
-            logger.error("update_balance_allowance error: %s", e)
-        try:
-            logger.info("Running update_balance_allowance CONDITIONAL...")
-            result2 = await asyncio.to_thread(client.update_balance_allowance, "CONDITIONAL")
-            logger.info("update_balance_allowance CONDITIONAL OK: %s", result2)
-        except Exception as e:
-            logger.error("update_balance_allowance CONDITIONAL error: %s", e)
+            logger.warning("update_balance_allowance skipped: %s", e)
 
 async def cancel_all():
     return []
