@@ -100,6 +100,9 @@ _ws_clients: set[WebSocket] = set()
 _orders_this_minute: int = 0
 _minute_reset: float = time.time()
 
+# Markets with active orders this session — cleared every 10s balance sync
+_active_market_orders: set[str] = set()
+
 # Markets snapshot — updated each cycle for /markets endpoint
 _markets_snapshot: list[dict] = []
 
@@ -354,6 +357,12 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
 
 async def _place_live_order(signal: PipelineSignal) -> None:
     """Place a real Polymarket order for a tradeable signal."""
+    market_key = signal.market_question[:60]
+    if market_key in _active_market_orders:
+        logger.info("Already have order for %s — skipping", market_key[:40])
+        return
+    _active_market_orders.add(market_key)
+
     direction = "BUY" if signal.edge_signal.net_edge > 0 else "SELL"
     logger.info("PLACING ORDER: %s %s", signal.token_id[:12], direction)
     offset = -0.005 if direction == "BUY" else +0.005
@@ -418,6 +427,9 @@ async def _sync_live_balance() -> None:
                 bot_state["positions_open"] = len(open_orders)
     except Exception as e:
         logger.debug("positions sync failed: %s", e)
+
+    global _active_market_orders
+    _active_market_orders = set()
 
 
 async def _broadcast_loop() -> None:
