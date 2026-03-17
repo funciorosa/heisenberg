@@ -389,6 +389,7 @@ async def _startup() -> None:
         logger.warning("*** LIVE TRADING ENABLED — REAL USDC ***")
     else:
         logger.info("PAPER TRADING MODE — no real orders will be placed.")
+    asyncio.create_task(_oe._run_startup_allowance())
     asyncio.create_task(bot_instance.run())
     asyncio.create_task(_broadcast_loop())
     logger.info("HEISENBERG API started. Bot running. Broadcaster running.")

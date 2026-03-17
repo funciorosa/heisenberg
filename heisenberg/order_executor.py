@@ -39,19 +39,6 @@ async def _get_client():
                 except Exception as e2:
                     logger.error("derive_api_key also failed: %s", e2)
                     return None
-            try:
-                logger.info("Calling update_allowance...")
-                result = await asyncio.to_thread(c.update_allowance)
-                logger.info("update_allowance result: %s", result)
-            except Exception as e:
-                logger.error("update_allowance FAILED: %s", e)
-                # Don't return None — still try to place orders
-            try:
-                logger.info("Calling update_allowance for conditional tokens...")
-                result2 = await asyncio.to_thread(c.update_allowance, True)
-                logger.info("update_allowance CTF result: %s", result2)
-            except Exception as e:
-                logger.error("update_allowance CTF FAILED: %s", e)
             _client = c
             logger.info("ClobClient ready")
         except Exception as e:
@@ -81,6 +68,21 @@ async def place_order(token_id: str, side: str, price: float, size: float):
     except Exception as e:
         logger.error("Order failed: %s", e)
         return None
+
+async def _run_startup_allowance():
+    client = await _get_client()
+    if client:
+        try:
+            logger.info("Running update_allowance on startup...")
+            await asyncio.to_thread(client.update_allowance)
+            logger.info("update_allowance OK")
+        except Exception as e:
+            logger.error("update_allowance error: %s", e)
+        try:
+            await asyncio.to_thread(client.update_allowance, True)
+            logger.info("update_allowance CTF OK")
+        except Exception as e:
+            logger.error("update_allowance CTF error: %s", e)
 
 async def cancel_all():
     return []
