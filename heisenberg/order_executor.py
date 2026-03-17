@@ -1,11 +1,14 @@
 import asyncio, logging, os, time
 logger = logging.getLogger(__name__)
 
-PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY", "")
-CLOB_HOST   = "https://clob.polymarket.com"
-CHAIN_ID    = 137
-_client     = None
-_lock       = asyncio.Lock()
+PRIVATE_KEY         = os.getenv("POLY_PRIVATE_KEY", "")
+RELAYER_KEY         = os.getenv("POLY_RELAYER_API_KEY", "")
+RELAYER_SECRET      = os.getenv("POLY_RELAYER_API_SECRET", "")
+RELAYER_PASSPHRASE  = os.getenv("POLY_RELAYER_API_PASSPHRASE", "")
+CLOB_HOST           = "https://clob.polymarket.com"
+CHAIN_ID            = 137
+_client             = None
+_lock               = asyncio.Lock()
 
 async def _get_client():
     global _client
@@ -19,25 +22,27 @@ async def _get_client():
             return None
         try:
             from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import ApiCreds
             c = await asyncio.to_thread(
                 ClobClient, CLOB_HOST,
                 key=PRIVATE_KEY,
                 chain_id=CHAIN_ID,
-                signature_type=0,
             )
-            # Get API credentials
-            try:
-                creds = await asyncio.to_thread(c.create_api_key)
+            if RELAYER_KEY:
+                creds = ApiCreds(
+                    api_key=RELAYER_KEY,
+                    api_secret=RELAYER_SECRET,
+                    api_passphrase=RELAYER_PASSPHRASE,
+                )
                 await asyncio.to_thread(c.set_api_creds, creds)
-                logger.info("API creds created OK: key=%s", creds.api_key)
-            except Exception as e1:
-                logger.warning("create_api_key failed: %s — trying derive", e1)
+                logger.info("Using relayer API creds: key=%s", RELAYER_KEY)
+            else:
                 try:
                     creds = await asyncio.to_thread(c.derive_api_key)
                     await asyncio.to_thread(c.set_api_creds, creds)
-                    logger.info("API creds derived OK: key=%s", creds.api_key)
-                except Exception as e2:
-                    logger.error("derive_api_key also failed: %s", e2)
+                    logger.info("API creds derived: key=%s", creds.api_key)
+                except Exception as e:
+                    logger.error("derive_api_key failed: %s", e)
                     return None
             _client = c
             logger.info("ClobClient ready")
