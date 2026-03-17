@@ -390,10 +390,10 @@ async def _sync_live_balance() -> None:
     try:
         client = await _oe._get_client()
         if client:
-            positions = await asyncio.to_thread(client.get_positions)
-            if positions:
-                open_pos = [p for p in positions if float(p.get("size", 0)) > 0]
-                bot_state["positions_open"] = len(open_pos)
+            orders = await asyncio.to_thread(client.get_orders)
+            if orders:
+                open_orders = [o for o in orders if o.get("status") in ("LIVE", "MATCHED")]
+                bot_state["positions_open"] = len(open_orders)
     except Exception as e:
         logger.debug("positions sync failed: %s", e)
 
