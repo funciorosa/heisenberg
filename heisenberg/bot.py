@@ -297,18 +297,18 @@ class HeisenbergBot:
             elif isinstance(r, Exception):
                 logger.debug("Token processing error: %s", r)
 
-        # Deduplicate: for each market event keep only the one token with the
-        # highest absolute net_edge.  Two tokens share the same market_question
-        # (YES and NO sides of the same Up/Down window), so trading both would
-        # mean taking both sides — guaranteed to cancel out PnL.
+        # Deduplicate: UP and DOWN are separate markets in the same time window
+        # but both sides resolve at the same end_date.  Group by end_date so we
+        # only trade the side with the highest |net_edge| per window.
+        # Fall back to market_question when end_date is absent.
         best: dict[str, PipelineSignal] = {}
         for s in signals:
-            key = s.market_question  # same for both YES/NO tokens
+            key = s.end_date or s.market_question
             if key not in best or abs(s.edge_signal.net_edge) > abs(best[key].edge_signal.net_edge):
                 best[key] = s
         if len(signals) != len(best):
             logger.info(
-                "Dedup: %d tokens → %d (dropped %d same-market duplicates)",
+                "Dedup: %d tokens → %d (dropped %d same-window duplicates)",
                 len(signals), len(best), len(signals) - len(best),
             )
         signals = list(best.values())
