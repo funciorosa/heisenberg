@@ -58,7 +58,7 @@ async def place_order(token_id: str, side: str, price: float, size: float):
             price=round(price, 3),
             size=round(size, 2),
             side=BUY if side.upper() == "BUY" else SELL,
-            expiration=int(time.time()) + 240,
+            expiration=0,
         )
         signed = await asyncio.to_thread(client.create_order, args)
         result = await asyncio.to_thread(client.post_order, signed)
