@@ -76,12 +76,39 @@ async def place_order(token_id: str, side: str, price: float, size: float):
 
 async def _run_startup_allowance():
     client = await _get_client()
-    if client:
-        try:
-            await asyncio.to_thread(client.update_balance_allowance)
-            logger.info("update_balance_allowance OK")
-        except Exception as e:
-            logger.warning("update_balance_allowance skipped: %s", e)
+    if not client:
+        return
+
+    try:
+        bal = await asyncio.to_thread(client.get_balance_allowance)
+        logger.info("Current balance/allowance: %s", bal)
+    except Exception as e:
+        logger.error("get_balance_allowance failed: %s", e)
+
+    methods_to_try = [
+        'update_balance_allowance',
+        'set_allowance',
+        'approve_usdc',
+    ]
+
+    for method_name in methods_to_try:
+        if hasattr(client, method_name):
+            method = getattr(client, method_name)
+            try:
+                result = await asyncio.to_thread(method)
+                logger.info("%s() OK: %s", method_name, result)
+            except Exception as e:
+                logger.error("%s() failed: %s", method_name, e)
+            try:
+                result = await asyncio.to_thread(method, "USDC")
+                logger.info("%s(USDC) OK: %s", method_name, result)
+            except Exception as e:
+                logger.error("%s(USDC) failed: %s", method_name, e)
+            try:
+                result = await asyncio.to_thread(method, "CONDITIONAL")
+                logger.info("%s(CONDITIONAL) OK: %s", method_name, result)
+            except Exception as e:
+                logger.error("%s(CONDITIONAL) failed: %s", method_name, e)
 
 async def cancel_all():
     return []
