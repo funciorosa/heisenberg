@@ -27,6 +27,7 @@ async def _get_client():
                 ClobClient, CLOB_HOST,
                 key=PRIVATE_KEY,
                 chain_id=CHAIN_ID,
+                signature_type=0,
             )
             if RELAYER_KEY:
                 creds = ApiCreds(
@@ -85,35 +86,21 @@ async def _run_startup_allowance():
         return
 
     try:
-        bal = await asyncio.to_thread(client.get_balance_allowance)
-        logger.info("Current balance/allowance: %s", bal)
-    except Exception as e:
-        logger.error("get_balance_allowance failed: %s", e)
-
-    methods_to_try = [
-        'update_balance_allowance',
-        'set_allowance',
-        'approve_usdc',
-    ]
-
-    for method_name in methods_to_try:
-        if hasattr(client, method_name):
-            method = getattr(client, method_name)
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        for asset in (AssetType.COLLATERAL, AssetType.CONDITIONAL):
+            params = BalanceAllowanceParams(asset_type=asset, signature_type=0)
             try:
-                result = await asyncio.to_thread(method)
-                logger.info("%s() OK: %s", method_name, result)
+                bal = await asyncio.to_thread(client.get_balance_allowance, params)
+                logger.info("balance_allowance %s: %s", asset, bal)
             except Exception as e:
-                logger.error("%s() failed: %s", method_name, e)
+                logger.error("get_balance_allowance(%s) failed: %s", asset, e)
             try:
-                result = await asyncio.to_thread(method, "USDC")
-                logger.info("%s(USDC) OK: %s", method_name, result)
+                result = await asyncio.to_thread(client.update_balance_allowance, params)
+                logger.info("update_balance_allowance(%s) OK: %s", asset, result)
             except Exception as e:
-                logger.error("%s(USDC) failed: %s", method_name, e)
-            try:
-                result = await asyncio.to_thread(method, "CONDITIONAL")
-                logger.info("%s(CONDITIONAL) OK: %s", method_name, result)
-            except Exception as e:
-                logger.error("%s(CONDITIONAL) failed: %s", method_name, e)
+                logger.error("update_balance_allowance(%s) failed: %s", asset, e)
+    except ImportError:
+        logger.warning("BalanceAllowanceParams not available in this py-clob-client version")
 
 async def cancel_all():
     return []
