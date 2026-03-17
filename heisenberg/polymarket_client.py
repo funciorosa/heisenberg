@@ -638,6 +638,13 @@ class PolymarketCLOBClient:
             logger.warning("fetch_short_horizon_markets Gamma API failed (%s)", exc)
             return []
 
+        # Prefer markets expiring within 20 minutes; fall back to 45 minutes
+        short = [(dt, m) for dt, m in results if (dt - now).total_seconds() <= 1200]
+        if short:
+            results = short
+        else:
+            results = [(dt, m) for dt, m in results if (dt - now).total_seconds() <= 2700]
+
         # Sort soonest-expiring first, cap at 10
         results.sort(key=lambda x: x[0])
         top10 = [m for _, m in results[:10]]
