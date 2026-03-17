@@ -103,6 +103,15 @@ async def _run_startup_allowance():
         logger.warning("BalanceAllowanceParams not available in this py-clob-client version")
 
 async def cancel_all():
-    return []
+    client = await _get_client()
+    if not client:
+        return []
+    try:
+        result = await asyncio.to_thread(client.cancel_all)
+        logger.info("cancel_all: %s", result)
+        return result or []
+    except Exception as e:
+        logger.error("cancel_all failed: %s", e)
+        return []
 
 CLOB_READY = bool(PRIVATE_KEY)

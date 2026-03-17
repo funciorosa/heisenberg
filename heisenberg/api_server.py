@@ -279,8 +279,7 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
     # Execute trades — live or paper
     if _LIVE_MODE:
-        for s in tradeable:
-            asyncio.create_task(_place_live_order(s))
+        asyncio.create_task(_cancel_then_place(tradeable))
     else:
         for s in tradeable:
             _simulate_trade(s)
@@ -323,6 +322,13 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
             "time": _format_time(),
         })
     bot_state["signals"] = bot_state["signals"][-50:]
+
+
+async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
+    """Cancel all open orders, then place fresh ones for this cycle's signals."""
+    await _oe.cancel_all()
+    for s in signals:
+        await _place_live_order(s)
 
 
 async def _place_live_order(signal: PipelineSignal) -> None:
