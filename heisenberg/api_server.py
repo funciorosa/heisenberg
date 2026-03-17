@@ -100,6 +100,14 @@ _ws_clients: set[WebSocket] = set()
 _open_positions: dict[str, float] = {}
 _STOP_LOSS_PCT = 0.30  # skip token if current price is 30%+ below entry
 
+# Pending tokens: added before order fires, removed after confirm/fail
+# Prevents race where multiple cycle signals beat the _open_positions update
+_pending_tokens: set[str] = set()
+
+# Hard limits
+_MAX_POSITIONS = 3    # never hold more than 3 open positions at once
+_MAX_ORDERS_PER_CYCLE = 1  # never place more than 1 order per cycle
+
 # Markets snapshot — updated each cycle for /markets endpoint
 _markets_snapshot: list[dict] = []
 
@@ -329,34 +337,54 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
 
 async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
-    """Cancel all open orders, then place fresh ones for this cycle's signals."""
-    global _open_positions
+    """Cancel all open orders, then place at most 1 new order this cycle."""
+    global _open_positions, _pending_tokens
 
     # Evict resolved positions (mid near 0 or 1 means market has settled)
-    _open_positions = {
-        tid: entry for tid, entry in _open_positions.items()
-        if not any(
-            s.token_id == tid and (s.mid_price > 0.95 or s.mid_price < 0.05)
-            for s in signals
-        )
+    resolved = {
+        s.token_id for s in signals
+        if s.mid_price > 0.95 or s.mid_price < 0.05
     }
+    for tid in resolved:
+        _open_positions.pop(tid, None)
+        _pending_tokens.discard(tid)
+
+    # Hard cap: do nothing if already at max positions
+    active = len(_open_positions) + len(_pending_tokens)
+    if active >= _MAX_POSITIONS:
+        logger.info(
+            "POSITION CAP: %d open+pending >= %d max — skipping cycle",
+            active, _MAX_POSITIONS,
+        )
+        return
 
     await _oe.cancel_all()
 
+    orders_this_cycle = 0
     for s in signals:
-        entry = _open_positions.get(s.token_id)
-        if entry is not None:
-            loss_pct = (entry - s.mid_price) / entry if entry > 0 else 0.0
-            if loss_pct >= _STOP_LOSS_PCT:
-                logger.warning(
-                    "STOP-LOSS: skipping %s entry=%.3f now=%.3f loss=%.0f%%",
-                    s.token_id[:12], entry, s.mid_price, loss_pct * 100,
-                )
+        # Hard cap: 1 order per cycle
+        if orders_this_cycle >= _MAX_ORDERS_PER_CYCLE:
+            logger.debug("MAX_ORDERS_PER_CYCLE reached — skipping remaining signals")
+            break
+
+        # Skip if token is already held or pending
+        if s.token_id in _open_positions or s.token_id in _pending_tokens:
+            entry = _open_positions.get(s.token_id)
+            if entry is not None:
+                loss_pct = (entry - s.mid_price) / entry if entry > 0 else 0.0
+                if loss_pct >= _STOP_LOSS_PCT:
+                    logger.warning(
+                        "STOP-LOSS: skipping %s entry=%.3f now=%.3f loss=%.0f%%",
+                        s.token_id[:12], entry, s.mid_price, loss_pct * 100,
+                    )
+                else:
+                    logger.info("SKIP existing position: %s", s.token_id[:12])
             else:
-                logger.info(
-                    "SKIP existing position: %s (entry=%.3f)", s.token_id[:12], entry,
-                )
-            continue  # never add to an existing position
+                logger.info("SKIP pending token: %s", s.token_id[:12])
+            continue
+
+        _pending_tokens.add(s.token_id)
+        orders_this_cycle += 1
         await _place_live_order(s)
 
 
@@ -372,6 +400,7 @@ async def _place_live_order(signal: PipelineSignal) -> None:
     shares = max(5.0, round(shares, 2))
 
     result = await _oe.place_order(signal.token_id, direction, price, shares)
+    _pending_tokens.discard(signal.token_id)  # always remove — confirm or fail
 
     label = _short_label(signal.market_question)
     if result:
