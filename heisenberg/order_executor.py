@@ -87,18 +87,13 @@ async def _run_startup_allowance():
 
     try:
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        for asset in (AssetType.COLLATERAL, AssetType.CONDITIONAL):
-            params = BalanceAllowanceParams(asset_type=asset, signature_type=0)
+        for sig_type in (0, 1, 2):
             try:
+                params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)
                 bal = await asyncio.to_thread(client.get_balance_allowance, params)
-                logger.info("balance_allowance %s: %s", asset, bal)
+                logger.info("balance sig_type=%d: %s", sig_type, bal)
             except Exception as e:
-                logger.error("get_balance_allowance(%s) failed: %s", asset, e)
-            try:
-                result = await asyncio.to_thread(client.update_balance_allowance, params)
-                logger.info("update_balance_allowance(%s) OK: %s", asset, result)
-            except Exception as e:
-                logger.error("update_balance_allowance(%s) failed: %s", asset, e)
+                logger.error("balance sig_type=%d failed: %s", sig_type, e)
     except ImportError:
         logger.warning("BalanceAllowanceParams not available in this py-clob-client version")
 
