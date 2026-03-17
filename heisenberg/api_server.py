@@ -344,7 +344,6 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
     if _orders_this_minute >= 20:
         logger.info("Rate limit: 20 orders/min reached — skipping cycle")
         return
-    _orders_this_minute += 1
 
     MAX_CONCURRENT = 3
     if bot_state.get("positions_open", 0) >= MAX_CONCURRENT:
@@ -373,6 +372,8 @@ async def _place_live_order(signal: PipelineSignal) -> None:
     shares = dollar_size / price if price > 0 else 0.0
     shares = max(1.0, round(shares, 2))
 
+    global _orders_this_minute
+    _orders_this_minute += 1
     result = await _oe.place_order(signal.token_id, direction, price, shares)
 
     label = _short_label(signal.market_question)
