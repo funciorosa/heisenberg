@@ -96,20 +96,11 @@ _markets_last_cycle: int = 0
 # Connected WebSocket clients
 _ws_clients: set[WebSocket] = set()
 
-# Open positions: token_id → entry price (filled orders we already hold)
-_open_positions: dict[str, float] = {}
-_STOP_LOSS_PCT = 0.30  # skip token if current price is 30%+ below entry
-
-# Pending tokens: added before order fires, removed after confirm/fail
-# Prevents race where multiple cycle signals beat the _open_positions update
-_pending_tokens: set[str] = set()
-
 # Placement lock: ensures only one _cancel_then_place runs at a time
 _place_lock = asyncio.Lock()
 
-# Hard limits
-_MAX_POSITIONS = 3    # never hold more than 3 open positions at once
-_MAX_ORDERS_PER_CYCLE = 1  # never place more than 1 order per cycle
+# Tokens we have ever ordered this session — never cleared, prevents re-entry
+_placed_this_session: set[str] = set()
 
 # Markets snapshot — updated each cycle for /markets endpoint
 _markets_snapshot: list[dict] = []
@@ -340,61 +331,14 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
 
 async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
-    """Cancel all open orders, then place at most 1 new order this cycle.
-
-    Guarded by _place_lock so concurrent cycle tasks cannot race past the
-    position-cap and pending-tokens checks simultaneously.
-    """
-    global _open_positions, _pending_tokens
-
+    """Place at most 1 order per cycle. Never re-enter a token seen this session."""
     async with _place_lock:
-        # Evict resolved positions: mid near 0 or 1 means market has settled.
-        # Build a price map for every token seen this cycle for O(1) lookup.
-        cycle_prices = {s.token_id: s.mid_price for s in signals}
-        for tid in list(_open_positions):
-            mid = cycle_prices.get(tid)
-            if mid is not None and (mid > 0.95 or mid < 0.05):
-                logger.info("EVICT resolved position (mid=%.3f): %s", mid, tid[:12])
-                _open_positions.pop(tid, None)
-                _pending_tokens.discard(tid)
-
-        # Hard cap: do nothing if already at max positions
-        active = len(_open_positions) + len(_pending_tokens)
-        if active >= _MAX_POSITIONS:
-            logger.info(
-                "POSITION CAP: %d open+pending >= %d max — skipping cycle",
-                active, _MAX_POSITIONS,
-            )
-            return
-
-        await _oe.cancel_all()
-
-        orders_this_cycle = 0
         for s in signals:
-            # Hard cap: 1 order per cycle
-            if orders_this_cycle >= _MAX_ORDERS_PER_CYCLE:
-                logger.debug("MAX_ORDERS_PER_CYCLE reached — skipping remaining signals")
-                break
-
-            # Skip if token is already held or pending
-            if s.token_id in _open_positions or s.token_id in _pending_tokens:
-                entry = _open_positions.get(s.token_id)
-                if entry is not None:
-                    loss_pct = (entry - s.mid_price) / entry if entry > 0 else 0.0
-                    if loss_pct >= _STOP_LOSS_PCT:
-                        logger.warning(
-                            "STOP-LOSS: skipping %s entry=%.3f now=%.3f loss=%.0f%%",
-                            s.token_id[:12], entry, s.mid_price, loss_pct * 100,
-                        )
-                    else:
-                        logger.info("SKIP existing position: %s", s.token_id[:12])
-                else:
-                    logger.info("SKIP pending token: %s", s.token_id[:12])
+            if s.token_id in _placed_this_session:
                 continue
-
-            _pending_tokens.add(s.token_id)
-            orders_this_cycle += 1
+            _placed_this_session.add(s.token_id)
             await _place_live_order(s)
+            return  # one order per cycle, then stop
 
 
 async def _place_live_order(signal: PipelineSignal) -> None:
@@ -409,11 +353,9 @@ async def _place_live_order(signal: PipelineSignal) -> None:
     shares = max(5.0, round(shares, 2))
 
     result = await _oe.place_order(signal.token_id, direction, price, shares)
-    _pending_tokens.discard(signal.token_id)  # always remove — confirm or fail
 
     label = _short_label(signal.market_question)
     if result:
-        _open_positions[signal.token_id] = price  # record entry for dedup + stop-loss
         bot_state["total_trades"] += 1
         bot_state["positions_open"] = bot_state.get("positions_open", 0) + 1
         bot_state["stream"].append({
@@ -462,17 +404,6 @@ async def _sync_live_balance() -> None:
             open_orders = [o for o in (orders or []) if o.get("status") in ("LIVE", "MATCHED")]
             bot_state["positions_open"] = len(open_orders)
 
-            # Reconcile _open_positions against actual CLOB orders.
-            # Any token we think is open but has no active CLOB order is resolved — evict it.
-            active_token_ids = {
-                o.get("asset_id") or o.get("token_id") or ""
-                for o in open_orders
-            }
-            stale = [tid for tid in list(_open_positions) if tid not in active_token_ids]
-            for tid in stale:
-                logger.info("EVICT resolved position: %s (no active CLOB order)", tid[:12])
-                _open_positions.pop(tid, None)
-                _pending_tokens.discard(tid)
     except Exception as e:
         logger.debug("positions sync failed: %s", e)
 
