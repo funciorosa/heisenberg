@@ -96,6 +96,10 @@ _markets_last_cycle: int = 0
 # Connected WebSocket clients
 _ws_clients: set[WebSocket] = set()
 
+# Open positions: token_id → entry price (filled orders we already hold)
+_open_positions: dict[str, float] = {}
+_STOP_LOSS_PCT = 0.30  # skip token if current price is 30%+ below entry
+
 # Markets snapshot — updated each cycle for /markets endpoint
 _markets_snapshot: list[dict] = []
 
@@ -326,8 +330,33 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
 async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
     """Cancel all open orders, then place fresh ones for this cycle's signals."""
+    global _open_positions
+
+    # Evict resolved positions (mid near 0 or 1 means market has settled)
+    _open_positions = {
+        tid: entry for tid, entry in _open_positions.items()
+        if not any(
+            s.token_id == tid and (s.mid_price > 0.95 or s.mid_price < 0.05)
+            for s in signals
+        )
+    }
+
     await _oe.cancel_all()
+
     for s in signals:
+        entry = _open_positions.get(s.token_id)
+        if entry is not None:
+            loss_pct = (entry - s.mid_price) / entry if entry > 0 else 0.0
+            if loss_pct >= _STOP_LOSS_PCT:
+                logger.warning(
+                    "STOP-LOSS: skipping %s entry=%.3f now=%.3f loss=%.0f%%",
+                    s.token_id[:12], entry, s.mid_price, loss_pct * 100,
+                )
+            else:
+                logger.info(
+                    "SKIP existing position: %s (entry=%.3f)", s.token_id[:12], entry,
+                )
+            continue  # never add to an existing position
         await _place_live_order(s)
 
 
@@ -346,6 +375,7 @@ async def _place_live_order(signal: PipelineSignal) -> None:
 
     label = _short_label(signal.market_question)
     if result:
+        _open_positions[signal.token_id] = price  # record entry for dedup + stop-loss
         bot_state["total_trades"] += 1
         bot_state["positions_open"] = bot_state.get("positions_open", 0) + 1
         bot_state["stream"].append({

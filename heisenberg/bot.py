@@ -126,6 +126,11 @@ class HeisenbergBot:
         # Rolling price history per token for z-score computation
         self._price_history: dict[str, list[float]] = {}
 
+        # Directional bias: asset → deque of last N signal directions (+1=UP, -1=DOWN)
+        from collections import deque
+        self._signal_history: dict[str, deque] = {}  # asset → deque(maxlen=3)
+        self._BIAS_WINDOW = 3  # require this many consecutive same-direction signals
+
     # ------------------------------------------------------------------
     # Per-token signal computation
     # ------------------------------------------------------------------
@@ -329,6 +334,39 @@ class HeisenbergBot:
                 len(signals), len(best), len(signals) - len(best),
             )
         signals = list(best.values())
+
+        # Momentum filter: record each signal's direction, then block any signal
+        # that opposes the asset's established trend (last N signals all same direction).
+        from collections import deque
+        momentum_filtered: list[PipelineSignal] = []
+        for s in signals:
+            asset = _asset_key(s.market_question)
+            direction = 1 if s.edge_signal.net_edge > 0 else -1
+            hist = self._signal_history.setdefault(asset, deque(maxlen=self._BIAS_WINDOW))
+
+            # Check bias BEFORE recording this signal
+            if len(hist) == self._BIAS_WINDOW and all(d == hist[0] for d in hist):
+                bias = hist[0]
+                if direction != bias:
+                    bias_name = "UP" if bias == 1 else "DOWN"
+                    logger.info(
+                        "MOMENTUM BLOCK %s: signal=%s blocked — last %d all %s",
+                        asset,
+                        "UP" if direction == 1 else "DOWN",
+                        self._BIAS_WINDOW,
+                        bias_name,
+                    )
+                    continue  # drop this signal entirely
+
+            hist.append(direction)
+            momentum_filtered.append(s)
+
+        if len(signals) != len(momentum_filtered):
+            logger.info(
+                "Momentum: %d → %d (blocked %d counter-trend signals)",
+                len(signals), len(momentum_filtered), len(signals) - len(momentum_filtered),
+            )
+        signals = momentum_filtered
 
         tradeable = [s for s in signals if s.edge_signal.is_tradeable]
         logger.info(
