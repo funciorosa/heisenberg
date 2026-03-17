@@ -297,18 +297,35 @@ class HeisenbergBot:
             elif isinstance(r, Exception):
                 logger.debug("Token processing error: %s", r)
 
-        # Deduplicate: UP and DOWN are separate markets in the same time window
-        # but both sides resolve at the same end_date.  Group by end_date so we
-        # only trade the side with the highest |net_edge| per window.
-        # Fall back to market_question when end_date is absent.
+        # Deduplicate: only one position per asset at a time.
+        # BTC UP 12:00PM and BTC DOWN 12:10PM are different windows but the
+        # same underlying asset — holding both hedges the position to zero.
+        # Extract asset tag from market_question; fall back to full question.
+        _ASSET_TAGS = {
+            "bitcoin": "BTC", "btc": "BTC",
+            "ethereum": "ETH", "eth": "ETH",
+            "solana": "SOL", "sol": "SOL",
+            "dogecoin": "DOGE", "doge": "DOGE",
+            "xrp": "XRP", "ripple": "XRP",
+            "bnb": "BNB",
+            "hype": "HYPE",
+        }
+
+        def _asset_key(question: str) -> str:
+            q = question.lower()
+            for kw, tag in _ASSET_TAGS.items():
+                if kw in q:
+                    return tag
+            return question[:20]  # unknown asset — use prefix
+
         best: dict[str, PipelineSignal] = {}
         for s in signals:
-            key = s.end_date or s.market_question
+            key = _asset_key(s.market_question)
             if key not in best or abs(s.edge_signal.net_edge) > abs(best[key].edge_signal.net_edge):
                 best[key] = s
         if len(signals) != len(best):
             logger.info(
-                "Dedup: %d tokens → %d (dropped %d same-window duplicates)",
+                "Dedup: %d tokens → %d (dropped %d cross-window duplicates by asset)",
                 len(signals), len(best), len(signals) - len(best),
             )
         signals = list(best.values())
