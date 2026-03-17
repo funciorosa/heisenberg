@@ -343,7 +343,11 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
         return
     _orders_this_minute += 1
 
-    await _oe.cancel_all()
+    MAX_CONCURRENT = 3
+    if bot_state.get("positions_open", 0) >= MAX_CONCURRENT:
+        logger.info("Max concurrent positions (%d) reached — skipping cycle", MAX_CONCURRENT)
+        return
+
     for s in signals:
         await _place_live_order(s)
 
@@ -358,7 +362,7 @@ async def _place_live_order(signal: PipelineSignal) -> None:
     # Convert Kelly dollar size → shares; enforce Polymarket 5-share minimum
     dollar_size = max(signal.kelly_position_size, 0.0)
     shares = dollar_size / price if price > 0 else 0.0
-    shares = max(5.0, round(shares, 2))
+    shares = max(1.0, round(shares, 2))
 
     result = await _oe.place_order(signal.token_id, direction, price, shares)
 
@@ -422,8 +426,6 @@ async def _broadcast_loop() -> None:
     while True:
         await asyncio.sleep(1)
         _expire_tick += 1
-        if _LIVE_MODE and _expire_tick % 30 == 0:
-            await _oe.cancel_all()
         if _LIVE_MODE and _expire_tick % 10 == 0:
             await _sync_live_balance()
 

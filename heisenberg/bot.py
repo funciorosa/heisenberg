@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -52,10 +53,10 @@ logger = logging.getLogger("HEISENBERG")
 
 POLL_INTERVAL_SECONDS = 2        # Aggressive: scan every 2 seconds
 MAX_MARKETS_PER_CYCLE = 0        # 0 = no cap, scan everything
-BANKROLL = 1_000.0               # Simulated capital (no real money)
-KELLY_FRACTION = 0.75            # Aggressive Kelly (was 0.25)
-MIN_EDGE_BPS = 10                # Low threshold — z-score off, net_edge is the gate
-MIN_Z_SCORE = 0.0                # Disable z-score gate — net_edge is the real gate
+BANKROLL = float(os.getenv("STARTING_CAPITAL", "100"))
+KELLY_FRACTION = 0.20            # Conservative fractional Kelly
+MIN_EDGE_BPS = 10                # Low threshold — z-score is the gate
+MIN_Z_SCORE = 1.5                # Require meaningful z-score before trading
 MAX_SPREAD_BPS = 800             # Relaxed spread tolerance
 
 # Market health filters — applied per token after book fetch
