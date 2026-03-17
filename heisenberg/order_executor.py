@@ -40,10 +40,18 @@ async def _get_client():
                     logger.error("derive_api_key also failed: %s", e2)
                     return None
             try:
-                await asyncio.to_thread(c.update_allowance)
-                logger.info("USDC allowance approved for CTF Exchange")
+                logger.info("Calling update_allowance...")
+                result = await asyncio.to_thread(c.update_allowance)
+                logger.info("update_allowance result: %s", result)
             except Exception as e:
-                logger.warning("update_allowance: %s", e)
+                logger.error("update_allowance FAILED: %s", e)
+                # Don't return None — still try to place orders
+            try:
+                logger.info("Calling update_allowance for conditional tokens...")
+                result2 = await asyncio.to_thread(c.update_allowance, True)
+                logger.info("update_allowance CTF result: %s", result2)
+            except Exception as e:
+                logger.error("update_allowance CTF FAILED: %s", e)
             _client = c
             logger.info("ClobClient ready")
         except Exception as e:
