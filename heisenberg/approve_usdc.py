@@ -11,7 +11,7 @@ POLYGON_RPCS = [
     "https://rpc.ankr.com/polygon",
     "https://polygon-rpc.com",
 ]
-USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
 CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1D45FE91671"
 MAX = 2**256 - 1
@@ -38,14 +38,14 @@ def approve():
 
     for spender_name, spender in [("CTF_EXCHANGE", CTF_EXCHANGE), ("NEG_RISK", NEG_RISK_EXCHANGE)]:
         try:
-            nonce = w3.eth.get_transaction_count(account.address)
+            nonce = w3.eth.get_transaction_count(account.address, 'pending')
             tx = usdc.functions.approve(
                 Web3.to_checksum_address(spender), MAX
             ).build_transaction({
                 "from": account.address,
                 "nonce": nonce,
                 "gas": 100000,
-                "gasPrice": w3.to_wei("200", "gwei"),
+                "gasPrice": w3.to_wei("400", "gwei"),
                 "chainId": 137,
             })
             signed = account.sign_transaction(tx)
