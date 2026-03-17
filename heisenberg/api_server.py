@@ -347,6 +347,7 @@ async def _place_live_order(signal: PipelineSignal) -> None:
     label = _short_label(signal.market_question)
     if result:
         bot_state["total_trades"] += 1
+        bot_state["positions_open"] = bot_state.get("positions_open", 0) + 1
         bot_state["stream"].append({
             "time": _format_time(),
             "tag": "ORDER",
@@ -369,6 +370,34 @@ bot_module.on_cycle_complete = _on_cycle_complete
 # WebSocket broadcaster
 # ---------------------------------------------------------------------------
 
+async def _sync_live_balance() -> None:
+    """Fetch real CLOB balance and open positions, update bot_state."""
+    try:
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        client = await _oe._get_client()
+        if not client:
+            return
+        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+        data = await asyncio.to_thread(client.get_balance_allowance, params)
+        raw = int(data.get("balance", "0"))
+        usdc_balance = raw / 1_000_000  # 6 decimals
+        bot_state["balance"] = round(usdc_balance, 2)
+        dep = bot_state["deposit"]
+        bot_state["roi"] = round((usdc_balance - dep) / dep * 100, 2) if dep > 0 else 0.0
+    except Exception as e:
+        logger.debug("balance sync failed: %s", e)
+
+    try:
+        client = await _oe._get_client()
+        if client:
+            positions = await asyncio.to_thread(client.get_positions)
+            if positions:
+                open_pos = [p for p in positions if float(p.get("size", 0)) > 0]
+                bot_state["positions_open"] = len(open_pos)
+    except Exception as e:
+        logger.debug("positions sync failed: %s", e)
+
+
 async def _broadcast_loop() -> None:
     """Push bot_state snapshot to all WS clients every 1s; expire stale orders every 30s."""
     _expire_tick = 0
@@ -377,6 +406,8 @@ async def _broadcast_loop() -> None:
         _expire_tick += 1
         if _LIVE_MODE and _expire_tick % 30 == 0:
             await _oe.cancel_all()
+        if _LIVE_MODE and _expire_tick % 10 == 0:
+            await _sync_live_balance()
 
         if not _ws_clients:
             continue
