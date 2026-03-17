@@ -364,6 +364,9 @@ async def _place_live_order(signal: PipelineSignal) -> None:
             "msg": f"{label} | {direction} ${result.size:.2f} @ {result.price:.4f} id={result.order_id[:8]}",
         })
         logger.info("LIVE ORDER: %s %s $%.2f @ %.4f", direction, label, result.size, result.price)
+    elif result.status == "paper":
+        # API unreachable — graceful paper fallback
+        _simulate_trade(signal)
     elif result.status == "skipped":
         logger.debug("Order skipped: %s", result.message)
     else:
@@ -412,9 +415,21 @@ async def _broadcast_loop() -> None:
 @app.on_event("startup")
 async def _startup() -> None:
     if _LIVE_MODE:
-        cancelled = await executor.cancel_all()
-        logger.info("LIVE MODE — cancelled %d stale orders on startup.", cancelled)
-        logger.warning("*** LIVE TRADING ENABLED — REAL USDC ***")
+        reachable = await executor.initialize()
+        if reachable:
+            cancelled = await executor.cancel_all()
+            logger.warning("*** LIVE TRADING ENABLED — REAL USDC — endpoint: %s ***", executor.base_url)
+            logger.info("Cancelled %d stale orders on startup.", cancelled)
+        else:
+            # API unreachable — executor auto-falls back to paper internally
+            bot_state["mode"] = "paper"
+            bot_state["stream"].append({
+                "time": _format_time(),
+                "tag": "WARN",
+                "cl": "s-tag-r",
+                "msg": "Polymarket API unreachable — auto-switched to PAPER mode",
+            })
+            logger.error("LIVE MODE requested but API unreachable — running paper.")
     else:
         logger.info("PAPER TRADING MODE — no real orders will be placed.")
     asyncio.create_task(bot_instance.run())

@@ -1,12 +1,15 @@
 """
-order_executor.py — Polymarket Relayer API order placement.
+order_executor.py — Polymarket order placement with endpoint auto-discovery.
+
+Probes endpoints on startup, uses first reachable one, auto-falls back to
+paper mode if all are unreachable.
 
 Safety guardrails:
   - $1.00 USDC hard cap per order
   - Max 3 simultaneous open positions
   - Auto-cancel orders older than 4 minutes
   - Balance floor: pause when balance < $40
-  - Min net_edge > 0.015 AND z_score > 1.0 to place order
+  - Min net_edge > 0.015 AND |z_score| > 1.0 to place order
   - Retry up to 3x on API errors
 """
 
@@ -23,17 +26,23 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-RELAYER_BASE = "https://relayer-api.polymarket.com"
+# Endpoint probe order — first reachable wins
+_CANDIDATE_BASES = [
+    "https://clob.polymarket.com",
+    "https://relayer-api.polymarket.com",
+    "https://gamma-api.polymarket.com",
+]
+
 _DEFAULT_TIMEOUT = 10.0
 
 # Hard safety limits
-MAX_ORDER_SIZE = 1.00        # $1.00 USDC hard cap
-MAX_POSITIONS = 3            # max simultaneous open positions
-ORDER_TTL_SECONDS = 240      # auto-cancel after 4 minutes
-BALANCE_FLOOR = 40.0         # pause if balance drops below $40
-MIN_NET_EDGE = 0.015         # minimum net_edge for live order
-MIN_Z_SCORE_LIVE = 1.0       # minimum z_score for live order
-MAX_RETRIES = 3              # retry attempts on transient API errors
+MAX_ORDER_SIZE = 1.00
+MAX_POSITIONS = 3
+ORDER_TTL_SECONDS = 240
+BALANCE_FLOOR = 40.0
+MIN_NET_EDGE = 0.015
+MIN_Z_SCORE_LIVE = 1.0
+MAX_RETRIES = 3
 
 
 @dataclass
@@ -50,7 +59,7 @@ class OrderRequest:
 @dataclass
 class OrderResult:
     order_id: str
-    status: str         # "live", "matched", "cancelled", "skipped", "paused", "error"
+    status: str         # "live", "matched", "skipped", "paused", "error", "paper"
     token_id: str
     side: str
     price: float
@@ -70,8 +79,8 @@ class OpenPosition:
 
 class OrderExecutor:
     """
-    Submits and cancels limit orders via Polymarket's Relayer API.
-    Tracks open positions, enforces safety limits, auto-cancels stale orders.
+    Submits limit orders via Polymarket API.
+    Auto-discovers working endpoint on startup; falls back to paper mode if none reachable.
     """
 
     def __init__(
@@ -81,10 +90,44 @@ class OrderExecutor:
     ) -> None:
         self.api_key = api_key or os.environ.get("POLY_RELAYER_API_KEY", "")
         self.relayer_address = relayer_address or os.environ.get("POLY_RELAYER_ADDRESS", "")
-        self._positions: dict[str, OpenPosition] = {}   # order_id → position
+        self.base_url: str = _CANDIDATE_BASES[0]   # updated by initialize()
+        self._reachable: bool = False               # set True after successful probe
+        self._positions: dict[str, OpenPosition] = {}
         self._paused: bool = False
         if not self.api_key:
             logger.warning("POLY_RELAYER_API_KEY not set — live trading disabled.")
+
+    # ------------------------------------------------------------------
+    # Startup probe
+    # ------------------------------------------------------------------
+
+    async def initialize(self) -> bool:
+        """
+        Probe candidate endpoints; set self.base_url to first reachable one.
+        Returns True if a working endpoint was found, False otherwise.
+        Auto-switches to paper mode (sets self._reachable=False) if all fail.
+        """
+        for base in _CANDIDATE_BASES:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(base + "/", follow_redirects=True)
+                    # Any HTTP response (even 404) means DNS + TCP work
+                    self.base_url = base
+                    self._reachable = True
+                    logger.info("Polymarket endpoint reachable: %s (HTTP %d)", base, resp.status_code)
+                    return True
+            except Exception as exc:
+                logger.warning("Endpoint probe failed for %s: %s", base, exc)
+
+        logger.error(
+            "POLYMARKET API UNREACHABLE — all endpoints failed DNS/TCP. "
+            "Bot automatically switching to PAPER mode."
+        )
+        self._reachable = False
+        return False
+
+    def is_live_capable(self) -> bool:
+        return self._reachable and bool(self.api_key)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -92,12 +135,13 @@ class OrderExecutor:
 
     def _headers(self) -> dict[str, str]:
         return {
-            "RELAYER_API_KEY": self.api_key,
+            "POLY_API_KEY": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
     async def _post(self, path: str, body: dict, retries: int = MAX_RETRIES) -> dict:
-        url = RELAYER_BASE + path
+        url = self.base_url + path
         last_exc: Exception = RuntimeError("no attempts made")
         for attempt in range(1, retries + 1):
             try:
@@ -113,7 +157,7 @@ class OrderExecutor:
         raise last_exc
 
     async def _delete(self, path: str) -> dict:
-        url = RELAYER_BASE + path
+        url = self.base_url + path
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await client.delete(url, headers=self._headers())
             resp.raise_for_status()
@@ -130,7 +174,6 @@ class OrderExecutor:
         return self._paused
 
     def check_balance_floor(self, balance: float) -> bool:
-        """Returns True if trading may continue; False and sets pause if floor hit."""
         if balance < BALANCE_FLOOR:
             if not self._paused:
                 logger.warning(
@@ -139,21 +182,19 @@ class OrderExecutor:
                 )
                 self._paused = True
             return False
-        # Recovered above floor — unpause
         if self._paused:
-            logger.info("Balance recovered to $%.2f — resuming live trading.", balance)
+            logger.info("Balance recovered to $%.2f — resuming.", balance)
             self._paused = False
         return True
 
     async def expire_old_orders(self) -> None:
-        """Cancel and remove orders older than ORDER_TTL_SECONDS."""
         now = time.time()
         expired = [
             oid for oid, pos in list(self._positions.items())
             if now - pos.placed_at > ORDER_TTL_SECONDS
         ]
         for oid in expired:
-            logger.info("Auto-cancelling stale order %s (>%ds old)", oid, ORDER_TTL_SECONDS)
+            logger.info("Auto-cancelling stale order %s", oid)
             await self.cancel_order(oid)
 
     # ------------------------------------------------------------------
@@ -162,32 +203,26 @@ class OrderExecutor:
 
     async def place_order(self, req: OrderRequest) -> OrderResult:
         """Place a live limit order with full safety guardrails."""
-        # API key check
-        if not self.api_key:
-            return OrderResult("", "error", req.token_id, req.side, req.price, req.size,
-                               "No API key configured.")
+        if not self._reachable or not self.api_key:
+            return OrderResult("", "paper", req.token_id, req.side, req.price, req.size,
+                               "API unreachable — paper mode active.")
 
-        # Paused (balance floor)
         if self._paused:
             return OrderResult("", "paused", req.token_id, req.side, req.price, req.size,
                                f"Paused — balance below ${BALANCE_FLOOR:.0f} floor.")
 
-        # Position cap
         if len(self._positions) >= MAX_POSITIONS:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
-                               f"Max {MAX_POSITIONS} positions already open.")
+                               f"Max {MAX_POSITIONS} positions open.")
 
-        # Edge gate
         if req.net_edge < MIN_NET_EDGE:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
                                f"net_edge {req.net_edge:.4f} < {MIN_NET_EDGE}")
 
-        # Z-score gate
         if abs(req.z_score) < MIN_Z_SCORE_LIVE:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
-                               f"|z_score| {abs(req.z_score):.3f} < {MIN_Z_SCORE_LIVE}")
+                               f"|z| {abs(req.z_score):.3f} < {MIN_Z_SCORE_LIVE}")
 
-        # Hard size cap
         size = min(req.size, MAX_ORDER_SIZE)
 
         body = {
@@ -197,23 +232,21 @@ class OrderExecutor:
             "size": str(round(size, 2)),
             "expiration": req.expiry_seconds,
             "signerAddress": self.relayer_address,
+            "orderType": "GTC",
         }
 
         try:
             data = await self._post("/order", body)
-            order_id = data.get("orderId") or data.get("id", "")
+            order_id = data.get("orderID") or data.get("orderId") or data.get("id", "")
             status = data.get("status", "live")
             if order_id:
                 self._positions[order_id] = OpenPosition(
-                    order_id=order_id,
-                    token_id=req.token_id,
-                    side=req.side,
-                    price=req.price,
-                    size=size,
+                    order_id=order_id, token_id=req.token_id,
+                    side=req.side, price=req.price, size=size,
                 )
             logger.info(
-                "LIVE ORDER PLACED: id=%s %s token=%s price=%.4f size=$%.2f",
-                order_id, req.side, req.token_id[:12], req.price, size,
+                "LIVE ORDER: id=%s %s token=%s price=%.4f size=$%.2f via %s",
+                order_id, req.side, req.token_id[:12], req.price, size, self.base_url,
             )
             return OrderResult(order_id, status, req.token_id, req.side, req.price, size)
         except httpx.HTTPStatusError as exc:
@@ -225,11 +258,9 @@ class OrderExecutor:
             return OrderResult("", "error", req.token_id, req.side, req.price, size, str(exc))
 
     def confirm_fill(self, order_id: str) -> None:
-        """Remove a filled order from open positions."""
         self._positions.pop(order_id, None)
 
     async def cancel_order(self, order_id: str) -> bool:
-        """Cancel an open order by ID. Returns True on success."""
         if not self.api_key or not order_id:
             return False
         try:
@@ -242,8 +273,7 @@ class OrderExecutor:
             return False
 
     async def cancel_all(self) -> int:
-        """Cancel all open orders. Returns count cancelled."""
-        if not self.api_key:
+        if not self.api_key or not self._reachable:
             return 0
         try:
             data = await self._delete("/orders")
