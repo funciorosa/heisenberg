@@ -71,6 +71,9 @@ async def place_order(token_id: str, side: str, price: float, size: float):
             side=BUY if side.upper() == "BUY" else SELL,
             expiration=0,
         )
+        logger.info("placing order: %s %s token=%s price=%.3f shares=%.2f maker=%s",
+                    side.upper(), token_id[:12], token_id[:12], round(price, 3), round(size, 2),
+                    PROXY_ADDRESS[:10] if PROXY_ADDRESS else "EOA")
         signed = await asyncio.to_thread(client.create_order, args)
         result = await asyncio.to_thread(client.post_order, signed)
         logger.info("LIVE ORDER: %s %s price=%.3f size=$%.2f → %s",
@@ -92,13 +95,21 @@ async def _run_startup_allowance():
 
     try:
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+        # Force CLOB to refresh its internal balance/allowance state from on-chain
         for sig_type in (0, 1, 2):
             try:
                 params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=sig_type)
-                bal = await asyncio.to_thread(client.get_balance_allowance, params)
-                logger.info("balance sig_type=%d: %s", sig_type, bal)
+                updated = await asyncio.to_thread(client.update_balance_allowance, params)
+                logger.info("update_balance_allowance sig_type=%d: %s", sig_type, updated)
             except Exception as e:
-                logger.error("balance sig_type=%d failed: %s", sig_type, e)
+                logger.error("update_balance_allowance sig_type=%d failed: %s", sig_type, e)
+        # Read final state
+        try:
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=2)
+            bal = await asyncio.to_thread(client.get_balance_allowance, params)
+            logger.info("balance after update sig_type=2: %s", bal)
+        except Exception as e:
+            logger.error("get_balance_allowance failed: %s", e)
     except ImportError:
         logger.warning("BalanceAllowanceParams not available in this py-clob-client version")
 
