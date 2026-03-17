@@ -96,12 +96,6 @@ _markets_last_cycle: int = 0
 # Connected WebSocket clients
 _ws_clients: set[WebSocket] = set()
 
-# Placement lock: ensures only one _cancel_then_place runs at a time
-_place_lock = asyncio.Lock()
-
-# Tokens we have ever ordered this session — never cleared, prevents re-entry
-_placed_this_session: set[str] = set()
-
 # Markets snapshot — updated each cycle for /markets endpoint
 _markets_snapshot: list[dict] = []
 
@@ -240,7 +234,7 @@ def _signal_to_stream(signal: PipelineSignal, tag: str, cl: str, msg: str) -> di
 # Cycle callback (called by bot after each cycle)
 # ---------------------------------------------------------------------------
 
-def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
+async def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
     global _tradeable_count, _cycle_count, _markets_last_cycle, _markets_snapshot
     _cycle_count += 1
     _markets_last_cycle = len(signals)
@@ -285,7 +279,7 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
     # Execute trades — live or paper
     if _LIVE_MODE:
-        asyncio.create_task(_cancel_then_place(tradeable))
+        await _cancel_then_place(tradeable)
     else:
         for s in tradeable:
             _simulate_trade(s)
@@ -331,14 +325,10 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
 
 async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
-    """Place at most 1 order per cycle. Never re-enter a token seen this session."""
-    async with _place_lock:
-        for s in signals:
-            if s.token_id in _placed_this_session:
-                continue
-            _placed_this_session.add(s.token_id)
-            await _place_live_order(s)
-            return  # one order per cycle, then stop
+    """Cancel all open orders, then place fresh ones for this cycle's signals."""
+    await _oe.cancel_all()
+    for s in signals:
+        await _place_live_order(s)
 
 
 async def _place_live_order(signal: PipelineSignal) -> None:
@@ -401,9 +391,9 @@ async def _sync_live_balance() -> None:
         client = await _oe._get_client()
         if client:
             orders = await asyncio.to_thread(client.get_orders)
-            open_orders = [o for o in (orders or []) if o.get("status") in ("LIVE", "MATCHED")]
-            bot_state["positions_open"] = len(open_orders)
-
+            if orders:
+                open_orders = [o for o in orders if o.get("status") in ("LIVE", "MATCHED")]
+                bot_state["positions_open"] = len(open_orders)
     except Exception as e:
         logger.debug("positions sync failed: %s", e)
 

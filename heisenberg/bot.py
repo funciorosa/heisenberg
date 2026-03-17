@@ -126,11 +126,6 @@ class HeisenbergBot:
         # Rolling price history per token for z-score computation
         self._price_history: dict[str, list[float]] = {}
 
-        # Directional bias: asset → deque of last N signal directions (+1=UP, -1=DOWN)
-        from collections import deque
-        self._signal_history: dict[str, deque] = {}  # asset → deque(maxlen=3)
-        self._BIAS_WINDOW = 3  # require this many consecutive same-direction signals
-
     # ------------------------------------------------------------------
     # Per-token signal computation
     # ------------------------------------------------------------------
@@ -302,71 +297,21 @@ class HeisenbergBot:
             elif isinstance(r, Exception):
                 logger.debug("Token processing error: %s", r)
 
-        # Deduplicate: only one position per asset at a time.
-        # BTC UP 12:00PM and BTC DOWN 12:10PM are different windows but the
-        # same underlying asset — holding both hedges the position to zero.
-        # Extract asset tag from market_question; fall back to full question.
-        _ASSET_TAGS = {
-            "bitcoin": "BTC", "btc": "BTC",
-            "ethereum": "ETH", "eth": "ETH",
-            "solana": "SOL", "sol": "SOL",
-            "dogecoin": "DOGE", "doge": "DOGE",
-            "xrp": "XRP", "ripple": "XRP",
-            "bnb": "BNB",
-            "hype": "HYPE",
-        }
-
-        def _asset_key(question: str) -> str:
-            q = question.lower()
-            for kw, tag in _ASSET_TAGS.items():
-                if kw in q:
-                    return tag
-            return question[:20]  # unknown asset — use prefix
-
+        # Deduplicate: for each market event keep only the one token with the
+        # highest absolute net_edge.  Two tokens share the same market_question
+        # (YES and NO sides of the same Up/Down window), so trading both would
+        # mean taking both sides — guaranteed to cancel out PnL.
         best: dict[str, PipelineSignal] = {}
         for s in signals:
-            key = _asset_key(s.market_question)
+            key = s.market_question  # same for both YES/NO tokens
             if key not in best or abs(s.edge_signal.net_edge) > abs(best[key].edge_signal.net_edge):
                 best[key] = s
         if len(signals) != len(best):
             logger.info(
-                "Dedup: %d tokens → %d (dropped %d cross-window duplicates by asset)",
+                "Dedup: %d tokens → %d (dropped %d same-market duplicates)",
                 len(signals), len(best), len(signals) - len(best),
             )
         signals = list(best.values())
-
-        # Momentum filter: record each signal's direction, then block any signal
-        # that opposes the asset's established trend (last N signals all same direction).
-        from collections import deque
-        momentum_filtered: list[PipelineSignal] = []
-        for s in signals:
-            asset = _asset_key(s.market_question)
-            direction = 1 if s.edge_signal.net_edge > 0 else -1
-            hist = self._signal_history.setdefault(asset, deque(maxlen=self._BIAS_WINDOW))
-
-            # Check bias BEFORE recording this signal
-            if len(hist) == self._BIAS_WINDOW and all(d == hist[0] for d in hist):
-                bias = hist[0]
-                if direction != bias:
-                    bias_name = "UP" if bias == 1 else "DOWN"
-                    logger.info(
-                        "MOMENTUM BLOCK %s: signal=%s blocked — last %d all %s",
-                        asset,
-                        "UP" if direction == 1 else "DOWN",
-                        self._BIAS_WINDOW,
-                        bias_name,
-                    )
-                    continue  # drop this signal entirely
-
-            hist.append(direction)
-            momentum_filtered.append(s)
-
-        if len(signals) != len(momentum_filtered):
-            logger.info(
-                "Momentum: %d → %d (blocked %d counter-trend signals)",
-                len(signals), len(momentum_filtered), len(signals) - len(momentum_filtered),
-            )
-        signals = momentum_filtered
 
         tradeable = [s for s in signals if s.edge_signal.is_tradeable]
         logger.info(
@@ -376,7 +321,7 @@ class HeisenbergBot:
 
         if on_cycle_complete is not None:
             try:
-                on_cycle_complete(signals)
+                await on_cycle_complete(signals)
             except Exception as cb_exc:
                 logger.debug("on_cycle_complete error: %s", cb_exc)
 
