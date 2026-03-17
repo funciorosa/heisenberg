@@ -390,6 +390,12 @@ async def _startup() -> None:
     else:
         logger.info("PAPER TRADING MODE — no real orders will be placed.")
     asyncio.create_task(_oe._run_startup_allowance())
+    try:
+        from approve_usdc import approve
+        await asyncio.to_thread(approve)
+        logger.info("USDC approved successfully")
+    except Exception as e:
+        logger.error("USDC approval error: %s", e)
     asyncio.create_task(bot_instance.run())
     asyncio.create_task(_broadcast_loop())
     logger.info("HEISENBERG API started. Bot running. Broadcaster running.")
