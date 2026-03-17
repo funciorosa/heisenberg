@@ -68,20 +68,58 @@ class OpenPosition:
 
 
 def _make_clob_client():
-    """Instantiate the official Polymarket ClobClient. Returns None if SDK unavailable."""
+    """
+    Instantiate ClobClient with full credentials.
+    If POLY_API_KEY/SECRET/PASSPHRASE are set, uses them directly.
+    Otherwise calls derive_api_key() and logs the values so they can
+    be saved to Railway env vars (remove derive block after first run).
+    Returns None if private key not configured.
+    """
     try:
         from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds
+
         private_key = os.environ.get("POLY_PRIVATE_KEY", "")
         wallet = os.environ.get("POLY_WALLET_ADDRESS", os.environ.get("POLY_RELAYER_ADDRESS", ""))
         if not private_key:
+            logger.warning("POLY_PRIVATE_KEY not set — live trading disabled.")
             return None
-        return ClobClient(
+
+        # Step 1: init with private key (L1 auth for signing)
+        client = ClobClient(
             host="https://clob.polymarket.com",
-            key=private_key,        # correct param name (not private_key=)
-            chain_id=137,           # Polygon mainnet
-            signature_type=0,       # L1 wallet-based auth
+            key=private_key,
+            chain_id=137,
+            signature_type=0,
             funder=wallet,
         )
+
+        # Step 2: load or derive API credentials
+        api_key = os.environ.get("POLY_API_KEY", "")
+        api_secret = os.environ.get("POLY_API_SECRET", "")
+        api_passphrase = os.environ.get("POLY_API_PASSPHRASE", "")
+
+        if api_key and api_secret and api_passphrase:
+            client.set_api_creds(ApiCreds(
+                api_key=api_key,
+                api_secret=api_secret,
+                api_passphrase=api_passphrase,
+            ))
+            logger.info("API credentials loaded from environment.")
+        else:
+            # One-time derivation — outputs creds to logs so you can save them
+            logger.info("Deriving API credentials from private key...")
+            creds = client.derive_api_key()
+            logger.info("=== COPY THESE TO RAILWAY ENV VARS ===")
+            logger.info("POLY_API_KEY=%s", creds.api_key)
+            logger.info("POLY_API_SECRET=%s", creds.api_secret)
+            logger.info("POLY_API_PASSPHRASE=%s", creds.api_passphrase)
+            logger.info("=== THEN REDEPLOY TO STOP LOGGING SECRETS ===")
+            client.set_api_creds(creds)
+
+        logger.info("ClobClient ready — L1 auth + API creds active.")
+        return client
+
     except Exception as exc:
         logger.warning("ClobClient init failed: %s", exc)
         return None
