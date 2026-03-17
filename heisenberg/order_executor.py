@@ -27,7 +27,7 @@ async def _get_client():
                 ClobClient, CLOB_HOST,
                 key=PRIVATE_KEY,
                 chain_id=CHAIN_ID,
-                signature_type=0,
+                signature_type=2,
             )
             if RELAYER_KEY:
                 creds = ApiCreds(
