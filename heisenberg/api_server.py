@@ -336,8 +336,10 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
     if now - _minute_reset > 60:
         _orders_this_minute = 0
         _minute_reset = now
+    logger.info("Rate: %d orders this minute, reset in %.0fs",
+                _orders_this_minute, 60 - (time.time() - _minute_reset))
     if _orders_this_minute >= 5:
-        logger.debug("Rate limit: 5 orders/min reached — skipping cycle")
+        logger.info("Rate limit: 5 orders/min reached — skipping cycle")
         return
     _orders_this_minute += 1
 
@@ -349,6 +351,7 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
 async def _place_live_order(signal: PipelineSignal) -> None:
     """Place a real Polymarket order for a tradeable signal."""
     direction = "BUY" if signal.edge_signal.net_edge > 0 else "SELL"
+    logger.info("PLACING ORDER: %s %s", signal.token_id[:12], direction)
     offset = -0.005 if direction == "BUY" else +0.005
     price = round(max(0.01, min(0.99, signal.mid_price + offset)), 3)
 
