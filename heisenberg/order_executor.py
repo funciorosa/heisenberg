@@ -71,16 +71,15 @@ def _make_clob_client():
     """Instantiate the official Polymarket ClobClient. Returns None if SDK unavailable."""
     try:
         from py_clob_client.client import ClobClient
-        from py_clob_client.constants import POLYGON
         private_key = os.environ.get("POLY_PRIVATE_KEY", "")
         wallet = os.environ.get("POLY_WALLET_ADDRESS", os.environ.get("POLY_RELAYER_ADDRESS", ""))
         if not private_key:
             return None
         return ClobClient(
             host="https://clob.polymarket.com",
-            chain_id=POLYGON,
-            private_key=private_key,
-            signature_type=0,   # L1 wallet-based auth
+            key=private_key,        # correct param name (not private_key=)
+            chain_id=137,           # Polygon mainnet
+            signature_type=0,       # L1 wallet-based auth
             funder=wallet,
         )
     except Exception as exc:
@@ -233,7 +232,7 @@ class OrderExecutor:
         self, token_id: str, side: str, price: float, size: float, expiration: int
     ) -> dict:
         """Synchronous SDK call — runs in thread executor to avoid blocking event loop."""
-        from py_clob_client.clob_types import OrderArgs
+        from py_clob_client.clob_types import OrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY, SELL
 
         order_args = OrderArgs(
@@ -246,7 +245,7 @@ class OrderExecutor:
             expiration=expiration,
         )
         signed_order = self._client.create_order(order_args)
-        return self._client.post_order(signed_order) or {}
+        return self._client.post_order(signed_order, OrderType.GTC) or {}
 
     # ------------------------------------------------------------------
     # Cancel
