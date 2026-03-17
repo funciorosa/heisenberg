@@ -55,6 +55,9 @@ async def _get_client():
     return _client
 
 async def place_order(token_id: str, side: str, price: float, size: float):
+    if round(size, 2) < 5.0:
+        logger.debug("Skipping order: size %.2f shares below minimum 5", size)
+        return None
     client = await _get_client()
     if not client:
         return None
