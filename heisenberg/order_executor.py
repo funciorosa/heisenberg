@@ -95,29 +95,46 @@ class OrderExecutor:
     """
 
     def __init__(self) -> None:
-        self._client = _make_clob_client()
+        # Client is NOT created here — ClobClient.__init__ makes blocking HTTP calls.
+        # It is created lazily inside initialize() which runs in a thread executor.
+        self._client = None
         self._positions: dict[str, OpenPosition] = {}
         self._paused: bool = False
-
-        if self._client:
-            logger.info("ClobClient ready — L1 auth active.")
-        else:
-            logger.warning("ClobClient unavailable — POLY_PRIVATE_KEY missing or SDK error.")
 
     # ------------------------------------------------------------------
     # Compatibility stub — called from api_server startup
     # ------------------------------------------------------------------
 
     async def initialize(self) -> bool:
-        """Probe CLOB endpoint reachability. Returns True if reachable."""
+        """
+        Probe CLOB reachability, then instantiate ClobClient in a thread executor
+        (the SDK makes blocking HTTP calls during __init__ — must not run on event loop).
+        Returns True if live trading is ready.
+        """
         import httpx
+        # Step 1: quick TCP probe (non-blocking)
         try:
             async with httpx.AsyncClient(timeout=8.0) as c:
                 resp = await c.get("https://clob.polymarket.com/", follow_redirects=True)
                 logger.info("CLOB endpoint reachable (HTTP %d).", resp.status_code)
-                return True
         except Exception as exc:
-            logger.error("CLOB endpoint unreachable: %s — switching to paper.", exc)
+            logger.error("CLOB endpoint unreachable: %s — paper mode.", exc)
+            return False
+
+        # Step 2: build ClobClient in a thread so blocking init calls don't stall uvicorn
+        try:
+            self._client = await asyncio.get_event_loop().run_in_executor(
+                None, _make_clob_client
+            )
+        except Exception as exc:
+            logger.error("ClobClient init failed: %s — paper mode.", exc)
+            return False
+
+        if self._client:
+            logger.info("ClobClient ready — L1 auth active.")
+            return True
+        else:
+            logger.warning("ClobClient unavailable — POLY_PRIVATE_KEY missing.")
             return False
 
     def is_live_capable(self) -> bool:
