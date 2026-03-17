@@ -19,10 +19,18 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
+
+try:
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+    _ETH_AVAILABLE = True
+except ImportError:
+    _ETH_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +100,18 @@ class OrderExecutor:
     ) -> None:
         self.api_key = api_key or os.environ.get("POLY_RELAYER_API_KEY", "")
         self.relayer_address = relayer_address or os.environ.get("POLY_RELAYER_ADDRESS", "")
+        self._private_key: str = os.environ.get("POLY_PRIVATE_KEY", "")
+        self._wallet_address: str = os.environ.get("POLY_WALLET_ADDRESS", self.relayer_address)
         self.base_url: str = _CANDIDATE_BASES[0]   # updated by initialize()
         self._reachable: bool = False               # set True after successful probe
         self._positions: dict[str, OpenPosition] = {}
         self._paused: bool = False
-        if not self.api_key:
-            logger.warning("POLY_RELAYER_API_KEY not set — live trading disabled.")
+        if self._private_key and _ETH_AVAILABLE:
+            logger.info("L1 auth available — POLY_PRIVATE_KEY loaded.")
+        elif self.api_key:
+            logger.info("API key auth available — POLY_RELAYER_API_KEY loaded.")
+        else:
+            logger.warning("No auth credentials — live trading disabled.")
 
     # ------------------------------------------------------------------
     # Startup probe
@@ -129,18 +143,37 @@ class OrderExecutor:
         return False
 
     def is_live_capable(self) -> bool:
-        return self._reachable and bool(self.api_key)
+        has_auth = bool(self._private_key and _ETH_AVAILABLE) or bool(self.api_key)
+        return self._reachable and has_auth
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "POLY_API_KEY": self.api_key,
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        """Build auth headers — L1 (private key) preferred, API key fallback."""
+        base = {"Content-Type": "application/json"}
+        if self._private_key and _ETH_AVAILABLE:
+            timestamp = str(int(time.time()))
+            nonce = uuid.uuid4().hex
+            message = f"{timestamp}{nonce}"
+            signed = Account.sign_message(
+                encode_defunct(text=message),
+                private_key=self._private_key,
+            )
+            base.update({
+                "POLY_ADDRESS": self._wallet_address,
+                "POLY_SIGNATURE": signed.signature.hex(),
+                "POLY_TIMESTAMP": timestamp,
+                "POLY_NONCE": nonce,
+            })
+        else:
+            # Fallback: Relayer-style API key header
+            base.update({
+                "POLY_API_KEY": self.api_key,
+                "Authorization": f"Bearer {self.api_key}",
+            })
+        return base
 
     async def _post(self, path: str, body: dict, retries: int = MAX_RETRIES) -> dict:
         url = self.base_url + path
@@ -205,9 +238,10 @@ class OrderExecutor:
 
     async def place_order(self, req: OrderRequest) -> OrderResult:
         """Place a live limit order with full safety guardrails."""
-        if not self._reachable or not self.api_key:
+        has_auth = bool(self._private_key and _ETH_AVAILABLE) or bool(self.api_key)
+        if not self._reachable or not has_auth:
             return OrderResult("", "paper", req.token_id, req.side, req.price, req.size,
-                               "API unreachable — paper mode active.")
+                               "API unreachable or no auth — paper mode active.")
 
         if self._paused:
             return OrderResult("", "paused", req.token_id, req.side, req.price, req.size,
