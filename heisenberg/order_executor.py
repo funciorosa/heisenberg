@@ -5,6 +5,7 @@ PRIVATE_KEY         = os.getenv("POLY_PRIVATE_KEY", "")
 RELAYER_KEY         = os.getenv("POLY_RELAYER_API_KEY", "")
 RELAYER_SECRET      = os.getenv("POLY_RELAYER_API_SECRET", "")
 RELAYER_PASSPHRASE  = os.getenv("POLY_RELAYER_API_PASSPHRASE", "")
+PROXY_ADDRESS       = os.getenv("POLY_PROXY_ADDRESS", "")
 CLOB_HOST           = "https://clob.polymarket.com"
 CHAIN_ID            = 137
 _client             = None
@@ -28,6 +29,7 @@ async def _get_client():
                 key=PRIVATE_KEY,
                 chain_id=CHAIN_ID,
                 signature_type=2,
+                funder=PROXY_ADDRESS or None,
             )
             if RELAYER_KEY:
                 creds = ApiCreds(
