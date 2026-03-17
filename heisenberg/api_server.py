@@ -96,8 +96,9 @@ _markets_last_cycle: int = 0
 # Connected WebSocket clients
 _ws_clients: set[WebSocket] = set()
 
-# Last market window traded — keyed by end_date to prevent repeat orders per window
-_last_traded_window: str | None = None
+# Rate limiter: max 5 orders per 60-second window
+_orders_this_minute: int = 0
+_minute_reset: float = time.time()
 
 # Markets snapshot — updated each cycle for /markets endpoint
 _markets_snapshot: list[dict] = []
@@ -328,23 +329,21 @@ async def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 
 
 async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
-    """Cancel all open orders, then place one order per unique market window."""
-    global _last_traded_window
+    """Cancel all open orders, then place signals — max 5 orders per minute."""
+    global _orders_this_minute, _minute_reset
 
-    if not signals:
+    now = time.time()
+    if now - _minute_reset > 60:
+        _orders_this_minute = 0
+        _minute_reset = now
+    if _orders_this_minute >= 5:
+        logger.debug("Rate limit: 5 orders/min reached — skipping cycle")
         return
-
-    # Use end_date as the market window key; fall back to first 30 chars of question
-    window_key = signals[0].end_date or signals[0].market_question[:30]
-    if window_key == _last_traded_window:
-        logger.debug("Skipping cycle — already traded window %s", window_key)
-        return
-    _last_traded_window = window_key
+    _orders_this_minute += 1
 
     await _oe.cancel_all()
     for s in signals:
         await _place_live_order(s)
-        await asyncio.sleep(2)
 
 
 async def _place_live_order(signal: PipelineSignal) -> None:
