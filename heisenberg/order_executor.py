@@ -66,7 +66,12 @@ async def place_order(token_id: str, side: str, price: float, size: float):
                     side.upper(), token_id[:12], price, size, result)
         return result
     except Exception as e:
+        error_msg = str(e)
         logger.error("Order failed: %s", e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            global _client
+            _client = None
+            logger.info("Credentials expired — will reinitialize on next order")
         return None
 
 async def _run_startup_allowance():
