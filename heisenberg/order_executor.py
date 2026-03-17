@@ -23,7 +23,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-RELAYER_URL = "https://relayer-api.polymarket.com"
+CLOB_URL = "https://clob.polymarket.com"   # confirmed reachable from Railway
 RELAYER_KEY = os.environ.get("POLY_RELAYER_API_KEY", "")
 
 MAX_ORDER_SIZE = 1.00
@@ -86,12 +86,12 @@ class OrderExecutor:
     async def initialize(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=8.0) as c:
-                resp = await c.get(RELAYER_URL + "/", follow_redirects=True)
-                logger.info("Relayer endpoint reachable (HTTP %d).", resp.status_code)
+                resp = await c.get(CLOB_URL + "/", follow_redirects=True)
+                logger.info("CLOB endpoint reachable (HTTP %d).", resp.status_code)
                 self._ready = bool(RELAYER_KEY)
                 return self._ready
         except Exception as exc:
-            logger.error("Relayer endpoint unreachable: %s", exc)
+            logger.error("CLOB endpoint unreachable: %s", exc)
             self._ready = False
             return False
 
@@ -163,11 +163,14 @@ class OrderExecutor:
             "timeInForce": "GTD",
             "expiration": int(time.time()) + req.expiry_seconds,
         }
-        headers = {"RELAYER_API_KEY": RELAYER_KEY, "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {RELAYER_KEY}",
+            "Content-Type": "application/json",
+        }
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(f"{RELAYER_URL}/order", headers=headers, json=body)
+                resp = await client.post(f"{CLOB_URL}/order", headers=headers, json=body)
             if resp.status_code == 200:
                 data = resp.json()
                 order_id = data.get("orderID") or data.get("orderId") or data.get("id", "")
@@ -197,8 +200,8 @@ class OrderExecutor:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.delete(
-                    f"{RELAYER_URL}/order/{order_id}",
-                    headers={"RELAYER_API_KEY": RELAYER_KEY},
+                    f"{CLOB_URL}/order/{order_id}",
+                    headers={"Authorization": f"Bearer {RELAYER_KEY}"},
                 )
             self._positions.pop(order_id, None)
             logger.info("Order cancelled — id=%s", order_id)
