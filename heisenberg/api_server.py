@@ -388,12 +388,14 @@ async def _startup() -> None:
     import subprocess
     import sys
     try:
+        logger.info("=== RUNNING APPROVE_USDC ===")
         result = subprocess.run(
             [sys.executable, "approve_usdc.py"],
             capture_output=True, text=True, timeout=60
         )
-        logger.info("approve_usdc stdout: %s", result.stdout)
-        logger.error("approve_usdc stderr: %s", result.stderr)
+        logger.info("approve_usdc STDOUT: %s", result.stdout or "(empty)")
+        logger.info("approve_usdc STDERR: %s", result.stderr or "(empty)")
+        logger.info("approve_usdc returncode: %s", result.returncode)
     except Exception as e:
         logger.error("approve_usdc failed: %s", e)
 
