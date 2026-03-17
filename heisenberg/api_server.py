@@ -416,28 +416,34 @@ async def _broadcast_loop() -> None:
 # Startup
 # ---------------------------------------------------------------------------
 
+async def _init_executor_bg() -> None:
+    """Initialize ClobClient in background — never blocks uvicorn startup."""
+    reachable = await executor.initialize()
+    if reachable:
+        cancelled = await executor.cancel_all()
+        logger.warning("*** LIVE TRADING ENABLED — REAL USDC ***")
+        logger.info("Cancelled %d stale orders on startup.", cancelled)
+    else:
+        bot_state["mode"] = "paper"
+        bot_state["stream"].append({
+            "time": _format_time(),
+            "tag": "WARN",
+            "cl": "s-tag-r",
+            "msg": "Polymarket API unreachable — auto-switched to PAPER mode",
+        })
+        logger.error("LIVE MODE requested but API unreachable — running paper.")
+
+
 @app.on_event("startup")
 async def _startup() -> None:
-    if _LIVE_MODE:
-        reachable = await executor.initialize()
-        if reachable:
-            cancelled = await executor.cancel_all()
-            logger.warning("*** LIVE TRADING ENABLED — REAL USDC — endpoint: %s ***", executor.base_url)
-            logger.info("Cancelled %d stale orders on startup.", cancelled)
-        else:
-            # API unreachable — executor auto-falls back to paper internally
-            bot_state["mode"] = "paper"
-            bot_state["stream"].append({
-                "time": _format_time(),
-                "tag": "WARN",
-                "cl": "s-tag-r",
-                "msg": "Polymarket API unreachable — auto-switched to PAPER mode",
-            })
-            logger.error("LIVE MODE requested but API unreachable — running paper.")
-    else:
-        logger.info("PAPER TRADING MODE — no real orders will be placed.")
+    # Spawn everything as background tasks — startup returns immediately
+    # so uvicorn can start accepting /health requests right away.
     asyncio.create_task(bot_instance.run())
     asyncio.create_task(_broadcast_loop())
+    if _LIVE_MODE:
+        asyncio.create_task(_init_executor_bg())
+    else:
+        logger.info("PAPER TRADING MODE — no real orders will be placed.")
     logger.info("HEISENBERG API started. Bot running. Broadcaster running.")
 
 
