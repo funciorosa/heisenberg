@@ -385,17 +385,23 @@ async def _broadcast_loop() -> None:
 
 @app.on_event("startup")
 async def _startup() -> None:
+    import subprocess
+    import sys
+    try:
+        result = subprocess.run(
+            [sys.executable, "approve_usdc.py"],
+            capture_output=True, text=True, timeout=60
+        )
+        logger.info("approve_usdc stdout: %s", result.stdout)
+        logger.error("approve_usdc stderr: %s", result.stderr)
+    except Exception as e:
+        logger.error("approve_usdc failed: %s", e)
+
     if _LIVE_MODE:
         logger.warning("*** LIVE TRADING ENABLED — REAL USDC ***")
     else:
         logger.info("PAPER TRADING MODE — no real orders will be placed.")
     asyncio.create_task(_oe._run_startup_allowance())
-    try:
-        from approve_usdc import approve
-        await asyncio.to_thread(approve)
-        logger.info("USDC approved successfully")
-    except Exception as e:
-        logger.error("USDC approval error: %s", e)
     asyncio.create_task(bot_instance.run())
     asyncio.create_task(_broadcast_loop())
     logger.info("HEISENBERG API started. Bot running. Broadcaster running.")
