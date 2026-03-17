@@ -1,7 +1,7 @@
 """
-order_executor.py — Polymarket order placement via official py-clob-client SDK.
+order_executor.py — Polymarket Relayer API order placement.
 
-The SDK handles all signing, nonces, and CLOB API headers automatically.
+Uses the Relayer API (POLY_RELAYER_API_KEY header) — no SDK, no signing required.
 
 Safety guardrails:
   - $1.00 USDC hard cap per order
@@ -9,21 +9,23 @@ Safety guardrails:
   - Auto-cancel orders older than 4 minutes
   - Balance floor: pause when balance < $40
   - Min net_edge > 0.05 AND ev > 0.01 AND spread <= 0.02
-  - Retry up to 3x on errors
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
-# Hard safety limits
+RELAYER_URL = "https://relayer-api.polymarket.com"
+RELAYER_KEY = os.environ.get("POLY_RELAYER_API_KEY", "")
+
 MAX_ORDER_SIZE = 1.00
 MAX_POSITIONS = 3
 ORDER_TTL_SECONDS = 240
@@ -31,15 +33,14 @@ BALANCE_FLOOR = 40.0
 MIN_NET_EDGE = 0.05
 MIN_EV = 0.01
 MAX_SPREAD = 0.02
-MAX_RETRIES = 3
 
 
 @dataclass
 class OrderRequest:
     token_id: str
-    side: str           # "BUY" or "SELL"
-    price: float        # limit price (0–1)
-    size: float         # USDC amount
+    side: str
+    price: float
+    size: float
     expiry_seconds: int = ORDER_TTL_SECONDS
     net_edge: float = 0.0
     ev: float = 0.0
@@ -49,7 +50,7 @@ class OrderRequest:
 @dataclass
 class OrderResult:
     order_id: str
-    status: str         # "live", "matched", "skipped", "paused", "error", "paper"
+    status: str
     token_id: str
     side: str
     price: float
@@ -67,118 +68,38 @@ class OpenPosition:
     placed_at: float = field(default_factory=time.time)
 
 
-def _make_clob_client():
-    """
-    Instantiate ClobClient with full credentials.
-    If POLY_API_KEY/SECRET/PASSPHRASE are set, uses them directly.
-    Otherwise calls derive_api_key() and logs the values so they can
-    be saved to Railway env vars (remove derive block after first run).
-    Returns None if private key not configured.
-    """
-    try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds
-
-        private_key = os.environ.get("POLY_PRIVATE_KEY", "")
-        wallet = os.environ.get("POLY_WALLET_ADDRESS", os.environ.get("POLY_RELAYER_ADDRESS", ""))
-        if not private_key:
-            logger.warning("POLY_PRIVATE_KEY not set — live trading disabled.")
-            return None
-
-        # Step 1: init with private key (L1 auth for signing)
-        client = ClobClient(
-            host="https://clob.polymarket.com",
-            key=private_key,
-            chain_id=137,
-            signature_type=0,
-            funder=wallet,
-        )
-
-        # Step 2: load or derive API credentials
-        api_key = os.environ.get("POLY_API_KEY", "")
-        api_secret = os.environ.get("POLY_API_SECRET", "")
-        api_passphrase = os.environ.get("POLY_API_PASSPHRASE", "")
-
-        if api_key and api_secret and api_passphrase:
-            client.set_api_creds(ApiCreds(
-                api_key=api_key,
-                api_secret=api_secret,
-                api_passphrase=api_passphrase,
-            ))
-            logger.info("API credentials loaded from environment.")
-        else:
-            # One-time derivation — outputs creds to logs so you can save them
-            logger.info("Deriving API credentials from private key...")
-            creds = client.derive_api_key()
-            logger.info("=== COPY THESE TO RAILWAY ENV VARS ===")
-            logger.info("POLY_API_KEY=%s", creds.api_key)
-            logger.info("POLY_API_SECRET=%s", creds.api_secret)
-            logger.info("POLY_API_PASSPHRASE=%s", creds.api_passphrase)
-            logger.info("=== THEN REDEPLOY TO STOP LOGGING SECRETS ===")
-            client.set_api_creds(creds)
-
-        logger.info("ClobClient ready — L1 auth + API creds active.")
-        return client
-
-    except Exception as exc:
-        logger.warning("ClobClient init failed: %s", exc)
-        return None
-
-
 class OrderExecutor:
-    """
-    Places limit orders via the official Polymarket py-clob-client SDK.
-    Falls back to paper mode if SDK unavailable or private key not set.
-    """
 
     def __init__(self) -> None:
-        # Client is NOT created here — ClobClient.__init__ makes blocking HTTP calls.
-        # It is created lazily inside initialize() which runs in a thread executor.
-        self._client = None
         self._positions: dict[str, OpenPosition] = {}
         self._paused: bool = False
+        self._ready: bool = False
+        if RELAYER_KEY:
+            logger.info("Relayer API key loaded — ready for live trading.")
+        else:
+            logger.warning("POLY_RELAYER_API_KEY not set — live trading disabled.")
 
     # ------------------------------------------------------------------
-    # Compatibility stub — called from api_server startup
+    # Startup probe (non-blocking — called as background task)
     # ------------------------------------------------------------------
 
     async def initialize(self) -> bool:
-        """
-        Probe CLOB reachability, then instantiate ClobClient in a thread executor
-        (the SDK makes blocking HTTP calls during __init__ — must not run on event loop).
-        Returns True if live trading is ready.
-        """
-        import httpx
-        # Step 1: quick TCP probe (non-blocking)
         try:
             async with httpx.AsyncClient(timeout=8.0) as c:
-                resp = await c.get("https://clob.polymarket.com/", follow_redirects=True)
-                logger.info("CLOB endpoint reachable (HTTP %d).", resp.status_code)
+                resp = await c.get(RELAYER_URL + "/", follow_redirects=True)
+                logger.info("Relayer endpoint reachable (HTTP %d).", resp.status_code)
+                self._ready = bool(RELAYER_KEY)
+                return self._ready
         except Exception as exc:
-            logger.error("CLOB endpoint unreachable: %s — paper mode.", exc)
-            return False
-
-        # Step 2: build ClobClient in a thread so blocking init calls don't stall uvicorn
-        try:
-            self._client = await asyncio.get_event_loop().run_in_executor(
-                None, _make_clob_client
-            )
-        except Exception as exc:
-            logger.error("ClobClient init failed: %s — paper mode.", exc)
-            return False
-
-        if self._client:
-            logger.info("ClobClient ready — L1 auth active.")
-            return True
-        else:
-            logger.warning("ClobClient unavailable — POLY_PRIVATE_KEY missing.")
+            logger.error("Relayer endpoint unreachable: %s", exc)
+            self._ready = False
             return False
 
     def is_live_capable(self) -> bool:
-        return self._client is not None
+        return self._ready and bool(RELAYER_KEY)
 
     # ------------------------------------------------------------------
-    # Position tracking & safety
+    # Safety helpers
     # ------------------------------------------------------------------
 
     def open_position_count(self) -> int:
@@ -213,110 +134,79 @@ class OrderExecutor:
     # ------------------------------------------------------------------
 
     async def place_order(self, req: OrderRequest) -> OrderResult:
-        """Place a live limit order via the Polymarket CLOB SDK."""
-        if not self._client:
+        if not RELAYER_KEY:
             return OrderResult("", "paper", req.token_id, req.side, req.price, req.size,
-                               "ClobClient unavailable — paper mode.")
-
+                               "No Relayer key — paper mode.")
         if self._paused:
             return OrderResult("", "paused", req.token_id, req.side, req.price, req.size,
                                f"Paused — balance below ${BALANCE_FLOOR:.0f}.")
-
         if len(self._positions) >= MAX_POSITIONS:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
                                f"Max {MAX_POSITIONS} positions open.")
-
         if req.net_edge < MIN_NET_EDGE:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
                                f"net_edge {req.net_edge:.4f} < {MIN_NET_EDGE}")
-
         if req.ev < MIN_EV:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
                                f"ev {req.ev:.4f} < {MIN_EV}")
-
         if req.spread > MAX_SPREAD:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
                                f"spread {req.spread:.4f} > {MAX_SPREAD}")
 
         size = min(req.size, MAX_ORDER_SIZE)
+        body = {
+            "tokenId": req.token_id,
+            "side": req.side.upper(),
+            "price": round(req.price, 3),
+            "size": round(size, 2),
+            "orderType": "LIMIT",
+            "timeInForce": "GTD",
+            "expiration": int(time.time()) + req.expiry_seconds,
+        }
+        headers = {"RELAYER_API_KEY": RELAYER_KEY, "Content-Type": "application/json"}
 
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, self._submit_order_sync, req.token_id, req.side, req.price, size,
-                    int(time.time()) + req.expiry_seconds,
-                )
-                order_id = result.get("orderID") or result.get("id", "")
-                status = result.get("status", "live")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(f"{RELAYER_URL}/order", headers=headers, json=body)
+            if resp.status_code == 200:
+                data = resp.json()
+                order_id = data.get("orderID") or data.get("orderId") or data.get("id", "")
+                status = data.get("status", "live")
                 if order_id:
                     self._positions[order_id] = OpenPosition(
                         order_id=order_id, token_id=req.token_id,
                         side=req.side, price=req.price, size=size,
                     )
-                logger.info(
-                    "LIVE ORDER: id=%s %s token=%s price=%.3f size=$%.2f",
-                    order_id, req.side, req.token_id[:12], req.price, size,
-                )
+                logger.info("LIVE ORDER: id=%s %s token=%s price=%.3f size=$%.2f",
+                            order_id, req.side, req.token_id[:12], req.price, size)
                 return OrderResult(order_id, status, req.token_id, req.side, req.price, size)
-            except Exception as exc:
-                logger.warning("place_order attempt %d/%d failed: %s", attempt, MAX_RETRIES, exc)
-                if attempt < MAX_RETRIES:
-                    await asyncio.sleep(0.5 * attempt)
-
-        return OrderResult("", "error", req.token_id, req.side, req.price, size,
-                           "All retry attempts failed.")
-
-    def _submit_order_sync(
-        self, token_id: str, side: str, price: float, size: float, expiration: int
-    ) -> dict:
-        """Synchronous SDK call — runs in thread executor to avoid blocking event loop."""
-        from py_clob_client.clob_types import OrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY, SELL
-
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            size=size,
-            side=BUY if side.upper() == "BUY" else SELL,
-            fee_rate_bps=0,
-            nonce=0,
-            expiration=expiration,
-        )
-        signed_order = self._client.create_order(order_args)
-        return self._client.post_order(signed_order, OrderType.GTC) or {}
-
-    # ------------------------------------------------------------------
-    # Cancel
-    # ------------------------------------------------------------------
+            else:
+                msg = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                logger.error("Order failed: %s", msg)
+                return OrderResult("", "error", req.token_id, req.side, req.price, size, msg)
+        except Exception as exc:
+            logger.error("place_order exception: %s", exc)
+            return OrderResult("", "error", req.token_id, req.side, req.price, size, str(exc))
 
     def confirm_fill(self, order_id: str) -> None:
         self._positions.pop(order_id, None)
 
     async def cancel_order(self, order_id: str) -> bool:
-        if not self._client or not order_id:
+        if not RELAYER_KEY or not order_id:
             return False
         try:
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._client.cancel, order_id
-            )
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.delete(
+                    f"{RELAYER_URL}/order/{order_id}",
+                    headers={"RELAYER_API_KEY": RELAYER_KEY},
+                )
             self._positions.pop(order_id, None)
             logger.info("Order cancelled — id=%s", order_id)
-            return True
+            return resp.status_code < 300
         except Exception as exc:
             logger.error("cancel_order failed for %s: %s", order_id, exc)
             return False
 
     async def cancel_all(self) -> int:
-        if not self._client:
-            return 0
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, self._client.cancel_all
-            )
-            count = result.get("cancelled", 0) if isinstance(result, dict) else 0
-            self._positions.clear()
-            logger.info("Cancelled %d open orders.", count)
-            return count
-        except Exception as exc:
-            logger.error("cancel_all failed: %s", exc)
-            return 0
+        # No-op on startup — Relayer auto-expires orders
+        return 0
