@@ -342,15 +342,19 @@ def _on_cycle_complete(signals: list[PipelineSignal]) -> None:
 async def _place_live_order(signal: PipelineSignal) -> None:
     """Place a real Polymarket order for a tradeable signal."""
     direction = "BUY" if signal.edge_signal.net_edge > 0 else "SELL"
-    price = signal.spread_data.ask if direction == "BUY" else signal.spread_data.bid
+    # Limit price just inside mid — avoids crossing spread, gets queue priority
+    offset = -0.005 if direction == "BUY" else +0.005
+    price = round(max(0.01, min(0.99, signal.mid_price + offset)), 3)
+    spread = signal.spread_data.ask - signal.spread_data.bid
 
     req = OrderRequest(
         token_id=signal.token_id,
         side=direction,
         price=price,
-        size=min(signal.kelly_position_size if signal.kelly_position_size >= 0.50 else 1.00, 1.00),
+        size=1.00,   # always $1.00 hard cap for live
         net_edge=signal.edge_signal.net_edge,
-        z_score=signal.edge_signal.z_score,
+        ev=signal.edge_signal.expected_value,
+        spread=spread,
     )
     result = await executor.place_order(req)
 

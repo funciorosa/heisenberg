@@ -40,8 +40,9 @@ MAX_ORDER_SIZE = 1.00
 MAX_POSITIONS = 3
 ORDER_TTL_SECONDS = 240
 BALANCE_FLOOR = 40.0
-MIN_NET_EDGE = 0.015
-MIN_Z_SCORE_LIVE = 1.0
+MIN_NET_EDGE = 0.05      # strong edge required (z-score gate removed)
+MIN_EV = 0.01            # positive expected value
+MAX_SPREAD = 0.02        # liquid market only
 MAX_RETRIES = 3
 
 
@@ -53,7 +54,8 @@ class OrderRequest:
     size: float         # USDC amount
     expiry_seconds: int = ORDER_TTL_SECONDS
     net_edge: float = 0.0
-    z_score: float = 0.0
+    ev: float = 0.0
+    spread: float = 0.0
 
 
 @dataclass
@@ -219,9 +221,13 @@ class OrderExecutor:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
                                f"net_edge {req.net_edge:.4f} < {MIN_NET_EDGE}")
 
-        if abs(req.z_score) < MIN_Z_SCORE_LIVE:
+        if req.ev < MIN_EV:
             return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
-                               f"|z| {abs(req.z_score):.3f} < {MIN_Z_SCORE_LIVE}")
+                               f"ev {req.ev:.4f} < {MIN_EV}")
+
+        if req.spread > MAX_SPREAD:
+            return OrderResult("", "skipped", req.token_id, req.side, req.price, req.size,
+                               f"spread {req.spread:.4f} > {MAX_SPREAD}")
 
         size = min(req.size, MAX_ORDER_SIZE)
 
