@@ -341,8 +341,8 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
         _minute_reset = now
     logger.info("Rate: %d orders this minute, reset in %.0fs",
                 _orders_this_minute, 60 - (time.time() - _minute_reset))
-    if _orders_this_minute >= 5:
-        logger.info("Rate limit: 5 orders/min reached — skipping cycle")
+    if _orders_this_minute >= 20:
+        logger.info("Rate limit: 20 orders/min reached — skipping cycle")
         return
     _orders_this_minute += 1
 
