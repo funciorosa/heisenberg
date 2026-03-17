@@ -340,14 +340,15 @@ async def _cancel_then_place(signals: list[PipelineSignal]) -> None:
     """Cancel all open orders, then place at most 1 new order this cycle."""
     global _open_positions, _pending_tokens
 
-    # Evict resolved positions (mid near 0 or 1 means market has settled)
-    resolved = {
-        s.token_id for s in signals
-        if s.mid_price > 0.95 or s.mid_price < 0.05
-    }
-    for tid in resolved:
-        _open_positions.pop(tid, None)
-        _pending_tokens.discard(tid)
+    # Evict resolved positions: mid near 0 or 1 means market has settled.
+    # Build a price map for every token seen this cycle for O(1) lookup.
+    cycle_prices = {s.token_id: s.mid_price for s in signals}
+    for tid in list(_open_positions):
+        mid = cycle_prices.get(tid)
+        if mid is not None and (mid > 0.95 or mid < 0.05):
+            logger.info("EVICT resolved position (mid=%.3f): %s", mid, tid[:12])
+            _open_positions.pop(tid, None)
+            _pending_tokens.discard(tid)
 
     # Hard cap: do nothing if already at max positions
     active = len(_open_positions) + len(_pending_tokens)
@@ -450,9 +451,20 @@ async def _sync_live_balance() -> None:
         client = await _oe._get_client()
         if client:
             orders = await asyncio.to_thread(client.get_orders)
-            if orders:
-                open_orders = [o for o in orders if o.get("status") in ("LIVE", "MATCHED")]
-                bot_state["positions_open"] = len(open_orders)
+            open_orders = [o for o in (orders or []) if o.get("status") in ("LIVE", "MATCHED")]
+            bot_state["positions_open"] = len(open_orders)
+
+            # Reconcile _open_positions against actual CLOB orders.
+            # Any token we think is open but has no active CLOB order is resolved — evict it.
+            active_token_ids = {
+                o.get("asset_id") or o.get("token_id") or ""
+                for o in open_orders
+            }
+            stale = [tid for tid in list(_open_positions) if tid not in active_token_ids]
+            for tid in stale:
+                logger.info("EVICT resolved position: %s (no active CLOB order)", tid[:12])
+                _open_positions.pop(tid, None)
+                _pending_tokens.discard(tid)
     except Exception as e:
         logger.debug("positions sync failed: %s", e)
 
