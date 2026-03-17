@@ -73,19 +73,11 @@ async def _run_startup_allowance():
     client = await _get_client()
     if client:
         try:
-            result = await asyncio.to_thread(client.set_allowance)
-            logger.info("set_allowance OK: %s", result)
-        except Exception as e1:
-            try:
-                result = await asyncio.to_thread(client.approve)
-                logger.info("approve OK: %s", result)
-            except Exception as e2:
-                try:
-                    result = await asyncio.to_thread(client.approve_erc20)
-                    logger.info("approve_erc20 OK: %s", result)
-                except Exception as e3:
-                    methods = [m for m in dir(client) if not m.startswith('_')]
-                    logger.info("Available ClobClient methods: %s", methods)
+            logger.info("Running update_balance_allowance...")
+            result = await asyncio.to_thread(client.update_balance_allowance)
+            logger.info("update_balance_allowance OK: %s", result)
+        except Exception as e:
+            logger.error("update_balance_allowance error: %s", e)
 
 async def cancel_all():
     return []
