@@ -39,6 +39,11 @@ async def _get_client():
                 except Exception as e2:
                     logger.error("derive_api_key also failed: %s", e2)
                     return None
+            try:
+                await asyncio.to_thread(c.update_allowance)
+                logger.info("USDC allowance approved for CTF Exchange")
+            except Exception as e:
+                logger.warning("update_allowance: %s", e)
             _client = c
             logger.info("ClobClient ready")
         except Exception as e:
